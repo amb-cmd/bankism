@@ -3,7 +3,7 @@ import {
   Shield, ShieldAlert, ShieldCheck, Terminal, Cpu, Lock, AlertTriangle, 
   CheckCircle2, XCircle, RefreshCw, LogOut, Github, ArrowRight, Play, 
   Activity, Zap, Database, Server, Flame, Eye, Copy, Check, Clock, Globe,
-  HelpCircle, Settings, UserCheck, Key, AlertOctagon, BarChart3, LayoutDashboard
+  HelpCircle, Settings, UserCheck, Key, AlertOctagon, BarChart3, LayoutDashboard, UserX, User
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -50,6 +50,7 @@ interface UserProfile {
   name: string;
   email: string;
   avatar_url: string;
+  is_guest?: boolean;
 }
 
 const PRESETS = [
@@ -94,10 +95,21 @@ export default function Index() {
   // View switcher: 'login' | 'dashboard' | 'analyzer'
   const [currentView, setCurrentView] = useState<'login' | 'dashboard' | 'analyzer'>(() => {
     const savedUser = localStorage.getItem('bankism_user');
-    return savedUser ? 'dashboard' : 'login';
+    const isGuest = localStorage.getItem('bankism_guest') === 'true';
+    return (savedUser || isGuest) ? 'dashboard' : 'login';
   });
 
   const [user, setUser] = useState<UserProfile | null>(() => {
+    const isGuest = localStorage.getItem('bankism_guest') === 'true';
+    if (isGuest) {
+      return {
+        id: 'guest_' + Math.random().toString(36).substring(2, 10),
+        name: 'Guest User',
+        email: 'guest@bankism.io',
+        avatar_url: '',
+        is_guest: true
+      };
+    }
     const saved = localStorage.getItem('bankism_user');
     return saved ? JSON.parse(saved) : null;
   });
@@ -126,8 +138,10 @@ export default function Index() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('bankism_history', JSON.stringify(history));
-  }, [history]);
+    if (!user?.is_guest) {
+      localStorage.setItem('bankism_history', JSON.stringify(history));
+    }
+  }, [history, user]);
 
   useEffect(() => {
     localStorage.setItem('bankism_session_score', sessionRiskScore.toString());
@@ -151,7 +165,6 @@ export default function Index() {
     };
     window.addEventListener('resize', handleResize);
 
-    // Particles array
     const particles = Array.from({ length: 35 }, () => ({
       x: Math.random() * width,
       y: Math.random() * height,
@@ -167,7 +180,6 @@ export default function Index() {
     const render = () => {
       ctx.clearRect(0, 0, width, height);
 
-      // 1. Draw particles
       particles.forEach(p => {
         p.y += p.speedY;
         p.x += p.speedX;
@@ -181,7 +193,6 @@ export default function Index() {
         ctx.fill();
       });
 
-      // 2. Radar sweep effect in center-top
       radarAngle += 0.008;
       ctx.save();
       ctx.translate(width / 2, height / 3);
@@ -202,7 +213,6 @@ export default function Index() {
       ctx.fill();
       ctx.restore();
 
-      // 3. Scanline sweep
       scanlineY += 0.8;
       if (scanlineY > height) scanlineY = 0;
       ctx.fillStyle = 'rgba(0, 240, 255, 0.025)';
@@ -224,10 +234,12 @@ export default function Index() {
       id: 'gh_' + Math.random().toString(36).substring(2, 9),
       name: 'Cyber Security Officer',
       email: 'secops@bankism.io',
-      avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80'
+      avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+      is_guest: false
     };
     setUser(mockUser);
     localStorage.setItem('bankism_user', JSON.stringify(mockUser));
+    localStorage.removeItem('bankism_guest');
     setCurrentView('dashboard');
     toast({
       title: "Authenticated via GitHub",
@@ -235,9 +247,30 @@ export default function Index() {
     });
   };
 
+  const handleGuestLogin = () => {
+    const guestUser: UserProfile = {
+      id: 'guest_' + Math.random().toString(36).substring(2, 10),
+      name: 'Guest User',
+      email: 'guest@bankism.io',
+      avatar_url: '',
+      is_guest: true
+    };
+    setUser(guestUser);
+    localStorage.setItem('bankism_guest', 'true');
+    localStorage.removeItem('bankism_user');
+    setHistory([]); // Guest history is in-memory only
+    setCurrentView('dashboard');
+    toast({
+      title: "Logged in as Guest",
+      description: "Demo Mode active. Data is stored in-memory only.",
+    });
+  };
+
   const handleSignOut = () => {
     setUser(null);
     localStorage.removeItem('bankism_user');
+    localStorage.removeItem('bankism_guest');
+    setHistory([]);
     setCurrentView('login');
     toast({
       title: "Signed Out",
@@ -302,7 +335,7 @@ export default function Index() {
     // Stage 2: Context Integrity
     await new Promise(r => setTimeout(r, 420));
     const contextFieldsToScan = [
-      user?.name || 'Cyber Security Officer',
+      user?.name || 'Security Officer',
       'Authorized Session Token: active_ok',
       sanitized
     ];
@@ -502,7 +535,7 @@ export default function Index() {
       stages: [stage1, stage2, stage3, stage4, stage5],
       timestamp: new Date().toLocaleTimeString(),
       input_text: rawInput,
-      user_id: user?.id || 'demo_user'
+      user_id: user?.id || 'guest_user'
     };
 
     setVerdict(finalResult);
@@ -554,7 +587,6 @@ export default function Index() {
   const threatsBlockedCount = history.filter(h => !h.approved).length;
   const safeApprovedCount = history.filter(h => h.approved).length;
 
-  // Threat Breakdown Chart Data
   const threatCategoriesList = [
     'prompt_injection', 
     'unauthorized_account', 
@@ -569,7 +601,6 @@ export default function Index() {
     count: history.filter(h => h.threat_category === cat).length
   }));
 
-  // Kill-Chain Stage Hits Data
   const stageHits = {
     sanitize: history.filter(h => h.blocking_stage === 'sanitize').length,
     pattern_scan: history.filter(h => h.blocking_stage === 'pattern_scan').length,
@@ -608,13 +639,32 @@ export default function Index() {
             Intercept and neutralize adversarial banking requests, prompt injections, and tool guard violations before they reach the core.
           </p>
 
-          <Button 
-            onClick={handleGitHubLogin}
-            className="w-full h-12 bg-[#24292e] hover:bg-[#2f363d] text-white border border-slate-700 font-mono text-xs gap-3 shadow-[0_0_20px_rgba(36,41,46,0.5)] transition-all hover:scale-[1.02]"
-          >
-            <Github className="w-5 h-5" />
-            Sign in with GitHub
-          </Button>
+          <div className="w-full flex flex-col gap-3">
+            {/* OPTION 1: GITHUB OAUTH */}
+            <Button 
+              onClick={handleGitHubLogin}
+              className="w-full h-12 bg-[#24292e] hover:bg-[#2f363d] text-white border border-slate-700 font-mono text-xs gap-3 shadow-[0_0_20px_rgba(36,41,46,0.5)] transition-all hover:scale-[1.02]"
+            >
+              <Github className="w-5 h-5" />
+              Sign in with GitHub
+            </Button>
+
+            <div className="flex items-center gap-3 my-1">
+              <Separator className="flex-1 bg-slate-800" />
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">OR</span>
+              <Separator className="flex-1 bg-slate-800" />
+            </div>
+
+            {/* OPTION 2: GUEST DEMO MODE */}
+            <Button 
+              onClick={handleGuestLogin}
+              variant="outline"
+              className="w-full h-11 bg-slate-900/80 hover:bg-slate-900 text-slate-300 hover:text-white border-slate-800 hover:border-[#00f0ff]/50 font-mono text-xs gap-2.5 transition-all"
+            >
+              <UserX className="w-4 h-4 text-[#00f0ff]" />
+              Continue as Guest (Demo Mode)
+            </Button>
+          </div>
 
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest bg-slate-900/60 px-3 py-1 rounded border border-slate-800">
             DEMO ENVIRONMENT — SECURE OAUTH GATEWAY
@@ -635,7 +685,11 @@ export default function Index() {
       {/* DEMO BANNER */}
       <div className="relative z-30 bg-[#ff2d55]/10 border-b border-[#ff2d55]/30 px-4 py-2 text-center text-xs font-mono text-[#ff2d55] tracking-widest uppercase flex items-center justify-center gap-2">
         <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
-        <span>DEMO ENVIRONMENT — No real financial transactions occur. Blue-Team AI Firewall active.</span>
+        <span>
+          {user?.is_guest 
+            ? "You are in Guest Mode. Data is not saved. Sign in to persist your history." 
+            : "DEMO ENVIRONMENT — No real financial transactions occur. Blue-Team AI Firewall active."}
+        </span>
         <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
       </div>
 
@@ -696,19 +750,35 @@ export default function Index() {
             <button onClick={handleResetSession} className="ml-1 text-[10px] underline text-slate-400 hover:text-white">Reset</button>
           </div>
 
-          <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full">
-            <img src={user.avatar_url} alt={user.name} className="w-6 h-6 rounded-full border border-[#00f0ff]" />
-            <span className="text-xs font-mono text-slate-200 hidden sm:inline">{user.name}</span>
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              onClick={handleSignOut} 
-              className="w-6 h-6 text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
-              title="Sign out"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-            </Button>
-          </div>
+          {user?.is_guest ? (
+            <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full">
+              <span className="text-xs font-mono bg-[#00f0ff]/10 border border-[#00f0ff]/30 text-[#00f0ff] px-2 py-0.5 rounded">
+                Guest Mode
+              </span>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={handleSignOut} 
+                className="h-7 text-xs font-mono text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
+              >
+                Sign Out
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full">
+              <img src={user?.avatar_url} alt={user?.name} className="w-6 h-6 rounded-full border border-[#00f0ff]" />
+              <span className="text-xs font-mono text-slate-200 hidden sm:inline">{user?.name}</span>
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                onClick={handleSignOut} 
+                className="w-6 h-6 text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
+                title="Sign out"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -733,7 +803,6 @@ export default function Index() {
           {/* TOP ROW — 4 STAT CARDS */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             
-            {/* Stat 1 */}
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#00f0ff]"></div>
               <CardContent className="p-4 flex items-center justify-between">
@@ -747,7 +816,6 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            {/* Stat 2 */}
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#ff2d55]"></div>
               <CardContent className="p-4 flex items-center justify-between">
@@ -761,7 +829,6 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            {/* Stat 3 */}
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-emerald-400"></div>
               <CardContent className="p-4 flex items-center justify-between">
@@ -775,7 +842,6 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            {/* Stat 4 */}
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-yellow-400"></div>
               <CardContent className="p-4 flex items-center justify-between">
@@ -806,7 +872,7 @@ export default function Index() {
               <CardContent className="h-[240px] pt-4">
                 {totalRequestsCount === 0 ? (
                   <div className="h-full flex items-center justify-center text-xs font-mono text-slate-500 italic">
-                    No analytics data yet. Run an analysis in the Analyzer view.
+                    No analyses yet. Head to the Analyzer to run your first request.
                   </div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
