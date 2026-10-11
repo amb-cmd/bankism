@@ -57,26 +57,30 @@ export default function Landing() {
     };
   }, []);
 
-  const handleTryDemo = () => {
-    // Seed demo account in localStorage profiles if not exists
+  const handleTryDemo = async () => {
+    // Demo credentials spec: demo@bankism.app, demo1234, PIN 123456
+    const demoEmail = 'demo@bankism.app';
+    const demoPin = '123456';
+    const hashedPin = 'hash_' + btoa(demoPin).split('').reverse().join('');
+
     const demoProfile = {
       user_id: 'usr_demo_123',
       full_name: 'Demo User',
-      email: 'demo@bankism.app',
-      phone: '5550198234',
-      pin: '123456',
-      pin_hash: 'hash_demo_123456',
+      email: demoEmail,
+      phone: '0000000000',
+      pin: demoPin,
+      pin_hash: hashedPin,
       bankism_id: 'BKSM-DEMO',
       enrollment_completed: true
     };
 
     const existingProfiles = JSON.parse(localStorage.getItem('bankism_profiles') || '{}');
-    existingProfiles['demo@bankism.app'] = demoProfile;
+    existingProfiles[demoEmail] = demoProfile;
     localStorage.setItem('bankism_profiles', JSON.stringify(existingProfiles));
 
     const authUser = {
       id: 'usr_demo_123',
-      email: 'demo@bankism.app',
+      email: demoEmail,
       full_name: 'Demo User',
       bankism_id: 'BKSM-DEMO',
       enrollment_completed: true,
@@ -86,7 +90,7 @@ export default function Landing() {
 
     toast({
       title: "Signed in as Demo User",
-      description: "Demo environment loaded successfully."
+      description: "Demo environment initialized successfully."
     });
 
     navigate('/dashboard');
