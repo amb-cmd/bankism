@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Shield, ShieldAlert, ShieldCheck, Terminal, Cpu, Lock, AlertTriangle, 
-  CheckCircle2, XCircle, RefreshCw, LogOut, Github, ArrowRight, Play, 
+import {
+  Shield, ShieldAlert, ShieldCheck, Terminal, Cpu, Lock, AlertTriangle,
+  CheckCircle2, XCircle, RefreshCw, LogOut, Github, ArrowRight, Play,
   Activity, Zap, Database, Server, Flame, Eye, Copy, Check, Clock, Globe,
   HelpCircle, Settings, UserCheck, Key, AlertOctagon
 } from 'lucide-react';
@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/hooks/use-toast';
 import confetti from 'canvas-confetti';
 
