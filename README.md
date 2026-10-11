@@ -36,7 +36,7 @@ Bankism is purpose-built for fintech engineers, security operations teams (SecOp
 
 ## Live Demo
 
-- **Live URL**: [https://bankism.vercel.app](https://bankism.vercel.app) *(or your deployed Vercel URL)*
+- **Live URL**: https://bankism-r15lwobit-ammarmdburhan-1496s-projects.vercel.app/
 - **Demo Credentials**:
   - **Email**: `demo@bankism.app`
   - **Password**: `demo1234`
@@ -311,8 +311,8 @@ GEMINI_API_KEY=AIzaSy...
 
 ## Author
 
-- **Ammar M Durbar**
-- **GitHub**: 
+- **Ammar Mohammed Burhan**
+- **GitHub**: https://github.com/amb-cmd
 - *Built for PromptWars @ UVCE*
 
 ---
