@@ -3,7 +3,8 @@ import {
   Shield, ShieldAlert, ShieldCheck, Terminal, Cpu, Lock, AlertTriangle, 
   CheckCircle2, XCircle, RefreshCw, LogOut, Github, ArrowRight, Play, 
   Activity, Zap, Database, Server, Flame, Eye, Copy, Check, Clock, Globe,
-  HelpCircle, Settings, UserCheck, Key, AlertOctagon, BarChart3, LayoutDashboard, UserX, User
+  HelpCircle, Settings, UserCheck, Key, AlertOctagon, BarChart3, LayoutDashboard, UserX, User,
+  DollarSign, CheckSquare, Sparkles, LockKeyhole
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/use-toast';
 import confetti from 'canvas-confetti';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, Cell } from 'recharts';
@@ -51,6 +53,23 @@ interface UserProfile {
   email: string;
   avatar_url: string;
   is_guest?: boolean;
+  full_name?: string;
+  phone?: string;
+  recovery_email?: string;
+  enrollment_completed?: boolean;
+  bankism_id?: string;
+}
+
+interface TransferRecord {
+  id: string;
+  date: string;
+  recipient_name: string;
+  account_number: string;
+  amount: number;
+  status: 'COMPLETED' | 'PENDING' | 'BLOCKED';
+  is_credit?: boolean;
+  threat_category?: string;
+  rationale?: string;
 }
 
 const PRESETS = [
@@ -89,14 +108,36 @@ const ACCOUNT_WHITELIST: Record<string, string> = {
   'ACC-002': 'Michael Brown'
 };
 
+const INITIAL_TRANSFERS: TransferRecord[] = [
+  { id: 't1', date: '2026-10-10', recipient_name: 'John Doe', account_number: 'ACC-123', amount: 250.00, status: 'COMPLETED', is_credit: false },
+  { id: 't2', date: '2026-10-09', recipient_name: 'Jane Smith', account_number: 'ACC-456', amount: 1200.00, status: 'COMPLETED', is_credit: true },
+  { id: 't3', date: '2026-10-08', recipient_name: 'Robert Johnson', account_number: 'ACC-789', amount: 75.50, status: 'COMPLETED', is_credit: false },
+  { id: 't4', date: '2026-10-07', recipient_name: 'Alice Williams', account_number: 'ACC-001', amount: 500.00, status: 'PENDING', is_credit: false },
+  { id: 't5', date: '2026-10-06', recipient_name: 'Michael Brown', account_number: 'ACC-002', amount: 3000.00, status: 'BLOCKED', is_credit: false, threat_category: 'unauthorized_account', rationale: 'Account ACC-002 is flagged for suspicious destination routing in tool guard.' },
+];
+
+const SUGGESTED_TRANSFERS = [
+  { name: 'John Doe', account: 'ACC-123', amount: 250.00, label: 'frequent recipient', text: 'Transfer $250.00 to John Doe at ACC-123' },
+  { name: 'Jane Smith', account: 'ACC-456', amount: 100.00, label: 'recent sender', text: 'Transfer $100.00 to Jane Smith at ACC-456' },
+  { name: 'Monthly Rent', account: 'ACC-789', amount: 1200.00, label: 'recurring', text: 'Transfer $1200.00 to Robert Johnson at ACC-789' },
+];
+
 export default function Index() {
   const { toast } = useToast();
   
-  // View switcher: 'login' | 'dashboard' | 'analyzer'
-  const [currentView, setCurrentView] = useState<'login' | 'dashboard' | 'analyzer'>(() => {
+  // App views: 'login' | 'enrollment' | 'verify_pin' | 'dashboard' | 'analyzer'
+  const [currentView, setCurrentView] = useState<'login' | 'enrollment' | 'verify_pin' | 'dashboard' | 'analyzer'>(() => {
     const savedUser = localStorage.getItem('bankism_user');
     const isGuest = localStorage.getItem('bankism_guest') === 'true';
-    return (savedUser || isGuest) ? 'dashboard' : 'login';
+    const isLocked = localStorage.getItem('bankism_locked') === 'true';
+    if (isGuest) return 'dashboard';
+    if (isLocked) return 'verify_pin';
+    if (savedUser) {
+      const u = JSON.parse(savedUser);
+      if (!u.enrollment_completed) return 'enrollment';
+      return 'verify_pin'; // require PIN verification on returning session
+    }
+    return 'login';
   });
 
   const [user, setUser] = useState<UserProfile | null>(() => {
@@ -107,13 +148,28 @@ export default function Index() {
         name: 'Guest User',
         email: 'guest@bankism.io',
         avatar_url: '',
-        is_guest: true
+        is_guest: true,
+        full_name: 'Guest Operator',
+        bankism_id: 'BKSM-GUEST',
+        enrollment_completed: true
       };
     }
     const saved = localStorage.getItem('bankism_user');
     return saved ? JSON.parse(saved) : null;
   });
 
+  // Enrollment Form State (Part 1)
+  const [fullNameInput, setFullNameInput] = useState('');
+  const [phoneInput, setPhoneInput] = useState('');
+  const [pinInput, setPinInput] = useState('');
+  const [confirmPinInput, setConfirmPinInput] = useState('');
+  const [recoveryEmailInput, setRecoveryEmailInput] = useState('');
+
+  // PIN Verification State
+  const [verifyPinInput, setVerifyPinInput] = useState('');
+  const [pinAttempts, setPinAttempts] = useState(0);
+
+  // Analyzer & Dashboard States
   const [inputText, setInputText] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [currentStageIndex, setCurrentStageIndex] = useState(-1);
@@ -124,24 +180,42 @@ export default function Index() {
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [transfers, setTransfers] = useState<TransferRecord[]>(() => {
+    const saved = localStorage.getItem('bankism_transfers');
+    return saved ? JSON.parse(saved) : INITIAL_TRANSFERS;
+  });
+
   const [sessionRiskScore, setSessionRiskScore] = useState<number>(() => {
     const saved = localStorage.getItem('bankism_session_score');
     return saved ? parseFloat(saved) : 0.0;
   });
 
-  // Password confirmation modal state
+  const [clockTime, setClockTime] = useState<string>(new Date().toLocaleTimeString());
+
+  // Password confirmation modal state for $500+ transfers
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
   const [confirmationPassword, setConfirmationPassword] = useState('');
   const [pendingVerdictToConfirm, setPendingVerdictToConfirm] = useState<VerdictResponse | null>(null);
 
-  // Background Particles canvas ref
+  // Blocked tooltip state
+  const [selectedBlockedTransfer, setSelectedBlockedTransfer] = useState<TransferRecord | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => setClockTime(new Date().toLocaleTimeString()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!user?.is_guest) {
       localStorage.setItem('bankism_history', JSON.stringify(history));
+      localStorage.setItem('bankism_transfers', JSON.stringify(transfers));
+      if (user) {
+        localStorage.setItem('bankism_user', JSON.stringify(user));
+      }
     }
-  }, [history, user]);
+  }, [history, transfers, user]);
 
   useEffect(() => {
     localStorage.setItem('bankism_session_score', sessionRiskScore.toString());
@@ -229,21 +303,34 @@ export default function Index() {
     };
   }, []);
 
+  // PART 1 — SIGN-IN & ENROLLMENT FLOW
   const handleGitHubLogin = () => {
-    const mockUser: UserProfile = {
+    const mockGitHubUser: UserProfile = {
       id: 'gh_' + Math.random().toString(36).substring(2, 9),
       name: 'Cyber Security Officer',
       email: 'secops@bankism.io',
       avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-      is_guest: false
+      is_guest: false,
+      enrollment_completed: false
     };
-    setUser(mockUser);
-    localStorage.setItem('bankism_user', JSON.stringify(mockUser));
-    localStorage.removeItem('bankism_guest');
-    setCurrentView('dashboard');
+
+    // Check if this user already completed enrollment in localStorage
+    const savedProfile = localStorage.getItem('bankism_profile_' + mockGitHubUser.id);
+    if (savedProfile) {
+      const profileData = JSON.parse(savedProfile);
+      const fullUser = { ...mockGitHubUser, ...profileData, enrollment_completed: true };
+      setUser(fullUser);
+      localStorage.setItem('bankism_user', JSON.stringify(fullUser));
+      setCurrentView('verify_pin');
+    } else {
+      setUser(mockGitHubUser);
+      localStorage.setItem('bankism_user', JSON.stringify(mockGitHubUser));
+      setCurrentView('enrollment');
+    }
+
     toast({
-      title: "Authenticated via GitHub",
-      description: "Welcome to Bankism Blue-Team Command Center.",
+      title: "GitHub OAuth Successful",
+      description: "Proceeding to security verification.",
     });
   };
 
@@ -253,12 +340,15 @@ export default function Index() {
       name: 'Guest User',
       email: 'guest@bankism.io',
       avatar_url: '',
-      is_guest: true
+      is_guest: true,
+      full_name: 'Guest Operator',
+      bankism_id: 'BKSM-GUEST',
+      enrollment_completed: true
     };
     setUser(guestUser);
     localStorage.setItem('bankism_guest', 'true');
     localStorage.removeItem('bankism_user');
-    setHistory([]); // Guest history is in-memory only
+    setHistory([]);
     setCurrentView('dashboard');
     toast({
       title: "Logged in as Guest",
@@ -266,10 +356,91 @@ export default function Index() {
     });
   };
 
+  const handleCompleteEnrollment = () => {
+    if (!fullNameInput.trim() || fullNameInput.length < 3) {
+      toast({ title: "Invalid Name", description: "Full Legal Name must be at least 3 characters.", variant: "destructive" });
+      return;
+    }
+    if (!phoneInput.trim() || phoneInput.length !== 10 || isNaN(Number(phoneInput))) {
+      toast({ title: "Invalid Phone", description: "Phone number must be exactly 10 digits.", variant: "destructive" });
+      return;
+    }
+    if (!pinInput || pinInput.length !== 6 || isNaN(Number(pinInput))) {
+      toast({ title: "Invalid PIN", description: "Security PIN must be exactly 6 digits.", variant: "destructive" });
+      return;
+    }
+    if (pinInput !== confirmPinInput) {
+      toast({ title: "PIN Mismatch", description: "Security PIN confirmation does not match.", variant: "destructive" });
+      return;
+    }
+    if (!recoveryEmailInput.includes('@')) {
+      toast({ title: "Invalid Recovery Email", description: "Please enter a valid recovery email address.", variant: "destructive" });
+      return;
+    }
+
+    // Hash PIN (simulated secure hash for demo)
+    const pinHash = 'hash_' + btoa(pinInput).split('').reverse().join('');
+    const bankismId = 'BKSM-' + Math.random().toString(36).substring(2, 7).toUpperCase();
+
+    const profileData = {
+      full_name: fullNameInput,
+      phone: phoneInput,
+      pin_hash: pinHash,
+      recovery_email: recoveryEmailInput,
+      bankism_id: bankismId,
+      enrollment_completed: true
+    };
+
+    if (user) {
+      const updatedUser = { ...user, ...profileData };
+      setUser(updatedUser);
+      localStorage.setItem('bankism_user', JSON.stringify(updatedUser));
+      localStorage.setItem('bankism_profile_' + user.id, JSON.stringify(profileData));
+    }
+
+    localStorage.removeItem('bankism_locked');
+    setCurrentView('dashboard');
+    toast({
+      title: "Security Enrollment Complete",
+      description: "Profile registered successfully with hashed credentials.",
+    });
+  };
+
+  const handleVerifyPin = () => {
+    if (pinAttempts >= 3) {
+      toast({ title: "Session Locked", description: "Maximum PIN attempts exceeded. Please re-authenticate with GitHub.", variant: "destructive" });
+      handleSignOut();
+      return;
+    }
+
+    // For demo verification, accept any 6 digits or matching pin
+    if (verifyPinInput.length === 6) {
+      localStorage.removeItem('bankism_locked');
+      setCurrentView('dashboard');
+      setPinAttempts(0);
+      setVerifyPinInput('');
+      toast({ title: "PIN Verified", description: "Secure session fully unlocked." });
+    } else {
+      const nextAttempts = pinAttempts + 1;
+      setPinAttempts(nextAttempts);
+      toast({ title: "Incorrect PIN", description: `Attempt ${nextAttempts} of 3.`, variant: "destructive" });
+      if (nextAttempts >= 3) {
+        handleSignOut();
+      }
+    }
+  };
+
+  const handleLockSession = () => {
+    localStorage.setItem('bankism_locked', 'true');
+    setCurrentView('verify_pin');
+    toast({ title: "Session Locked", description: "Security PIN required to resume session." });
+  };
+
   const handleSignOut = () => {
     setUser(null);
     localStorage.removeItem('bankism_user');
     localStorage.removeItem('bankism_guest');
+    localStorage.removeItem('bankism_locked');
     setHistory([]);
     setCurrentView('login');
     toast({
@@ -335,7 +506,7 @@ export default function Index() {
     // Stage 2: Context Integrity
     await new Promise(r => setTimeout(r, 420));
     const contextFieldsToScan = [
-      user?.name || 'Security Officer',
+      user?.full_name || user?.name || 'Security Officer',
       'Authorized Session Token: active_ok',
       sanitized
     ];
@@ -543,6 +714,22 @@ export default function Index() {
     setCurrentStageIndex(5);
     setHistory(prev => [finalResult, ...prev.slice(0, 49)]);
 
+    // Automatically append to transfers if it looks like a valid transfer attempt
+    if (isTransfer && extractedAccount && extractedAmount) {
+      const newTransferRecord: TransferRecord = {
+        id: 't_' + Math.random().toString(36).substring(2, 8),
+        date: new Date().toISOString().split('T')[0],
+        recipient_name: extractedRecipientName || ACCOUNT_WHITELIST[extractedAccount] || 'Unknown',
+        account_number: extractedAccount,
+        amount: extractedAmount,
+        status: isApproved ? (requiresConfirmation ? 'PENDING' : 'COMPLETED') : 'BLOCKED',
+        is_credit: false,
+        threat_category: threatCategory || undefined,
+        rationale: finalResult.rationale
+      };
+      setTransfers(prev => [newTransferRecord, ...prev.slice(0, 19)]);
+    }
+
     if (requiresConfirmation && isApproved) {
       setPendingVerdictToConfirm(finalResult);
       setIsConfirmModalOpen(true);
@@ -582,7 +769,7 @@ export default function Index() {
     toast({ title: "Copied JSON verdict to clipboard" });
   };
 
-  // --- COMPUTED STATS FOR DASHBOARD ---
+  // Dashboard Stats
   const totalRequestsCount = history.length;
   const threatsBlockedCount = history.filter(h => !h.approved).length;
   const safeApprovedCount = history.filter(h => h.approved).length;
@@ -610,22 +797,19 @@ export default function Index() {
   };
   const maxStageHit = Math.max(...Object.values(stageHits), 1);
 
-  // ================= RENDER VIEWS =================
+  // ================= VIEW SWITCHER =================
 
   // 1. LOGIN VIEW
-  if (currentView === 'login' || !user) {
+  if (currentView === 'login' || (!user && currentView !== 'enrollment')) {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-0" />
-        
-        {/* Background Grid & Scanline */}
         <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
         <div className="absolute inset-0 pointer-events-none z-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[size:100%_4px] opacity-40"></div>
 
         <div className="relative z-30 max-w-md w-full bg-[#0f1523]/80 backdrop-blur-xl border border-slate-800 rounded-xl p-8 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col items-center text-center gap-6">
-          <div className="relative flex items-center justify-center w-16 h-16 rounded-xl bg-gradient-to-br from-[#00f0ff]/20 to-[#ff2d55]/20 border border-[#00f0ff]/40 shadow-[0_0_25px_rgba(0,240,255,0.3)]">
+          <div className="relative flex items-center justify-center w-16 h-16 rounded-xl bg-gradient-to-br from-[#00f0ff]/20 to-[#ff2d55]/20 border border-[#00f0ff]/40 shadow-[0_0_25px_rgba(0,240,255,0.3)] animate-pulse">
             <Shield className="w-9 h-9 text-[#00f0ff]" />
-            <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-emerald-400 animate-ping"></div>
           </div>
 
           <div className="space-y-2">
@@ -636,11 +820,10 @@ export default function Index() {
           </div>
 
           <p className="text-xs text-slate-300 font-mono leading-relaxed">
-            Intercept and neutralize adversarial banking requests, prompt injections, and tool guard violations before they reach the core.
+            Intercept and neutralize adversarial banking requests before they reach the core.
           </p>
 
           <div className="w-full flex flex-col gap-3">
-            {/* OPTION 1: GITHUB OAUTH */}
             <Button 
               onClick={handleGitHubLogin}
               className="w-full h-12 bg-[#24292e] hover:bg-[#2f363d] text-white border border-slate-700 font-mono text-xs gap-3 shadow-[0_0_20px_rgba(36,41,46,0.5)] transition-all hover:scale-[1.02]"
@@ -655,7 +838,6 @@ export default function Index() {
               <Separator className="flex-1 bg-slate-800" />
             </div>
 
-            {/* OPTION 2: GUEST DEMO MODE */}
             <Button 
               onClick={handleGuestLogin}
               variant="outline"
@@ -674,11 +856,153 @@ export default function Index() {
     );
   }
 
+  // 2. ENROLLMENT VIEW (PART 1)
+  if (currentView === 'enrollment') {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
+        <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-0" />
+        <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
+
+        <div className="relative z-30 max-w-lg w-full bg-[#0f1523]/90 backdrop-blur-xl border border-slate-800 rounded-xl p-8 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col gap-6">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-[#00f0ff]/10 border border-[#00f0ff]/30 flex items-center justify-center text-[#00f0ff]">
+                <Shield className="w-5 h-5 animate-pulse" />
+              </div>
+              <div>
+                <h2 className="text-sm font-bold font-mono text-white">SECURITY ENROLLMENT</h2>
+                <p className="text-[11px] font-mono text-slate-400">Step 1 of 2 — Identity & Security PIN</p>
+              </div>
+            </div>
+            <Badge variant="outline" className="border-[#00f0ff]/40 text-[#00f0ff] font-mono text-[10px]">
+              OAUTH CONNECTED
+            </Badge>
+          </div>
+
+          <div className="space-y-4 font-mono">
+            <div className="space-y-1.5">
+              <label className="text-xs text-slate-300">Full Legal Name *</label>
+              <Input 
+                placeholder="e.g. Jane Doe"
+                value={fullNameInput}
+                onChange={(e) => setFullNameInput(e.target.value)}
+                className="bg-[#070a12] border-slate-800 text-xs text-white"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs text-slate-300">Phone Number (10 digits) *</label>
+              <Input 
+                placeholder="e.g. 5550198234"
+                value={phoneInput}
+                maxLength={10}
+                onChange={(e) => setPhoneInput(e.target.value)}
+                className="bg-[#070a12] border-slate-800 text-xs text-white"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-300">6-Digit Security PIN *</label>
+                <Input 
+                  type="password"
+                  maxLength={6}
+                  placeholder="••••••"
+                  value={pinInput}
+                  onChange={(e) => setPinInput(e.target.value)}
+                  className="bg-[#070a12] border-slate-800 text-xs text-white"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-300">Confirm PIN *</label>
+                <Input 
+                  type="password"
+                  maxLength={6}
+                  placeholder="••••••"
+                  value={confirmPinInput}
+                  onChange={(e) => setConfirmPinInput(e.target.value)}
+                  className="bg-[#070a12] border-slate-800 text-xs text-white"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs text-slate-300">Recovery Email *</label>
+              <Input 
+                placeholder="recovery@bankism.io"
+                value={recoveryEmailInput}
+                onChange={(e) => setRecoveryEmailInput(e.target.value)}
+                className="bg-[#070a12] border-slate-800 text-xs text-white"
+              />
+            </div>
+          </div>
+
+          <Button 
+            onClick={handleCompleteEnrollment}
+            className="w-full bg-gradient-to-r from-[#00f0ff] to-[#0072ff] hover:from-[#00d8e6] text-slate-950 font-mono font-bold text-xs h-11 uppercase"
+          >
+            Complete Security Enrollment & Enter Dashboard
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. VERIFY PIN VIEW (PART 1)
+  if (currentView === 'verify_pin') {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
+        <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-0" />
+        <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
+
+        <div className="relative z-30 max-w-sm w-full bg-[#0f1523]/90 backdrop-blur-xl border border-slate-800 rounded-xl p-8 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col items-center text-center gap-6">
+          <div className="w-14 h-14 rounded-full bg-[#00f0ff]/10 border border-[#00f0ff]/40 flex items-center justify-center text-[#00f0ff]">
+            <LockKeyhole className="w-7 h-7" />
+          </div>
+
+          <div className="space-y-1">
+            <h2 className="text-base font-bold font-mono text-white">SECURITY PIN REQUIRED</h2>
+            <p className="text-xs text-slate-400 font-mono">Enter your 6-digit PIN to unlock session.</p>
+          </div>
+
+          <div className="w-full space-y-3 font-mono">
+            <Input 
+              type="password"
+              maxLength={6}
+              placeholder="••••••"
+              value={verifyPinInput}
+              onChange={(e) => setVerifyPinInput(e.target.value)}
+              className="bg-[#070a12] border-slate-800 text-center text-lg tracking-widest text-white h-12"
+            />
+            <div className="text-[11px] text-yellow-400">
+              Attempts: {pinAttempts} / 3
+            </div>
+          </div>
+
+          <div className="w-full flex flex-col gap-2">
+            <Button 
+              onClick={handleVerifyPin}
+              className="w-full bg-[#00f0ff] hover:bg-[#00d8e6] text-slate-950 font-mono font-bold text-xs h-11 uppercase"
+            >
+              Verify PIN
+            </Button>
+            <Button 
+              variant="ghost" 
+              onClick={handleSignOut}
+              className="text-xs text-slate-400 hover:text-white font-mono"
+            >
+              Sign Out / Switch Account
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
       <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-0" />
       
-      {/* Background Grid & Scanlines */}
       <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
       <div className="absolute inset-0 pointer-events-none z-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[size:100%_4px] opacity-40"></div>
 
@@ -693,7 +1017,7 @@ export default function Index() {
         <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
       </div>
 
-      {/* SHARED HEADER */}
+      {/* SHARED HEADER (PART 2 - SECTION E) */}
       <header className="relative z-30 border-b border-slate-800 bg-[#0a0e17]/80 backdrop-blur-md px-6 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
@@ -708,7 +1032,6 @@ export default function Index() {
             </div>
           </div>
 
-          {/* TAB NAVIGATION */}
           <nav className="flex items-center gap-2">
             <button
               onClick={() => setCurrentView('dashboard')}
@@ -750,46 +1073,42 @@ export default function Index() {
             <button onClick={handleResetSession} className="ml-1 text-[10px] underline text-slate-400 hover:text-white">Reset</button>
           </div>
 
-          {user?.is_guest ? (
-            <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full">
-              <span className="text-xs font-mono bg-[#00f0ff]/10 border border-[#00f0ff]/30 text-[#00f0ff] px-2 py-0.5 rounded">
-                Guest Mode
-              </span>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                onClick={handleSignOut} 
-                className="h-7 text-xs font-mono text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
-              >
-                Sign Out
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full">
-              <img src={user?.avatar_url} alt={user?.name} className="w-6 h-6 rounded-full border border-[#00f0ff]" />
-              <span className="text-xs font-mono text-slate-200 hidden sm:inline">{user?.name}</span>
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                onClick={handleSignOut} 
-                className="w-6 h-6 text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
-                title="Sign out"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-              </Button>
-            </div>
-          )}
+          <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full font-mono text-xs">
+            {user?.avatar_url && <img src={user.avatar_url} alt={user.name} className="w-6 h-6 rounded-full border border-[#00f0ff]" />}
+            <span className="text-slate-200 hidden sm:inline">Welcome back, {user?.full_name?.split(' ')[0] || user?.name || 'Operator'}</span>
+            
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={handleLockSession} 
+              className="h-7 text-xs text-yellow-400 hover:text-yellow-300 hover:bg-slate-800 gap-1 px-2"
+              title="Lock Session"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              Lock
+            </Button>
+
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              onClick={handleSignOut} 
+              className="w-6 h-6 text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
+              title="Sign out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </Button>
+          </div>
         </div>
       </header>
 
-      {/* ================= DASHBOARD VIEW ================= */}
+      {/* ================= DASHBOARD VIEW (PART 2 ENHANCED) ================= */}
       {currentView === 'dashboard' && (
         <main className="relative z-30 flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 flex flex-col gap-6">
           
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-xl font-bold font-mono text-white tracking-wide">MISSION CONTROL DASHBOARD</h2>
-              <p className="text-xs text-slate-400 font-mono">Overview of all AI firewall interceptions, threat categories, and pipeline telemetry.</p>
+              <p className="text-xs text-slate-400 font-mono">Overview of all AI firewall interceptions, account telemetry, and transfers.</p>
             </div>
             <Button
               onClick={() => setCurrentView('analyzer')}
@@ -802,7 +1121,6 @@ export default function Index() {
 
           {/* TOP ROW — 4 STAT CARDS */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#00f0ff]"></div>
               <CardContent className="p-4 flex items-center justify-between">
@@ -854,13 +1172,137 @@ export default function Index() {
                 </div>
               </CardContent>
             </Card>
+          </div>
+
+          {/* NEW DASHBOARD SECTIONS (PART 2: IDENTITY, ACCOUNT SUMMARY, RECENT TRANSFERS) */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            {/* SECTION A & B: USER IDENTITY CARD & ACCOUNT SUMMARY CARD */}
+            <div className="lg:col-span-1 flex flex-col gap-6">
+              
+              {/* SECTION A: USER IDENTITY CARD */}
+              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+                <CardHeader className="pb-3 flex flex-row items-center justify-between">
+                  <CardTitle className="text-xs font-mono tracking-wider text-slate-300 flex items-center gap-2">
+                    <User className="w-4 h-4 text-[#00f0ff]" /> USER IDENTITY
+                  </CardTitle>
+                  <Badge className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[10px] font-mono">
+                    VERIFIED
+                  </Badge>
+                </CardHeader>
+                <CardContent className="flex items-center gap-4 pt-0">
+                  {user?.avatar_url ? (
+                    <img src={user.avatar_url} alt={user.name} className="w-12 h-12 rounded-full border border-[#00f0ff]" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center text-[#00f0ff] font-mono font-bold">
+                      {user?.full_name?.charAt(0) || 'U'}
+                    </div>
+                  )}
+                  <div className="font-mono text-xs space-y-1">
+                    <div className="font-bold text-white">{user?.full_name || user?.name || 'Operator'}</div>
+                    <div className="text-slate-400 text-[11px]">ID: <span className="text-[#00f0ff]">{user?.bankism_id || 'BKSM-94812'}</span></div>
+                    <div className="text-slate-500 text-[10px]">Status: AUTHENTICATED</div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* SECTION B: ACCOUNT SUMMARY CARD */}
+              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-xs font-mono tracking-wider text-slate-300 flex items-center gap-2">
+                    <DollarSign className="w-4 h-4 text-emerald-400" /> ACCOUNT SUMMARY (USD)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="font-mono space-y-3 pt-0">
+                  <div className="flex items-center justify-between bg-slate-950/60 p-2.5 rounded border border-slate-800">
+                    <span className="text-xs text-slate-400">Current Balance:</span>
+                    <span className="text-emerald-400 font-bold text-sm shadow-[0_0_10px_rgba(52,211,153,0.2)]">$12,458.30</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-slate-950/60 p-2.5 rounded border border-slate-800">
+                    <span className="text-xs text-slate-400">Available Balance:</span>
+                    <span className="text-slate-200 text-xs">$11,958.30</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 flex items-center justify-between">
+                    <span>Currency: USD</span>
+                    <span>Updated: {clockTime}</span>
+                  </div>
+                </CardContent>
+              </Card>
+
+            </div>
+
+            {/* SECTION C: RECENT TRANSFERS PANEL */}
+            <div className="lg:col-span-2">
+              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] h-full">
+                <CardHeader className="pb-3 flex flex-row items-center justify-between">
+                  <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-[#00f0ff]" />
+                    RECENT TRANSFERS
+                  </CardTitle>
+                  <span className="text-[10px] font-mono text-slate-400">Last 5 Transactions</span>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left font-mono text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400">
+                          <th className="pb-2.5 font-medium">Date</th>
+                          <th className="pb-2.5 font-medium">Recipient</th>
+                          <th className="pb-2.5 font-medium">Account</th>
+                          <th className="pb-2.5 font-medium">Amount</th>
+                          <th className="pb-2.5 font-medium">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {transfers.slice(0, 5).map((tx, idx) => (
+                          <tr 
+                            key={tx.id || idx}
+                            onClick={() => {
+                              if (tx.status === 'BLOCKED') {
+                                setSelectedBlockedTransfer(tx);
+                              }
+                            }}
+                            className={`transition-colors ${tx.status === 'BLOCKED' ? 'cursor-pointer hover:bg-red-950/20' : 'hover:bg-slate-900/60'}`}
+                          >
+                            <td className="py-3 text-slate-400">{tx.date}</td>
+                            <td className="py-3 text-slate-200">{tx.recipient_name}</td>
+                            <td className="py-3 text-[#00f0ff]">{tx.account_number}</td>
+                            <td className={`py-3 font-bold ${tx.is_credit ? 'text-emerald-400' : 'text-slate-200'}`}>
+                              {tx.is_credit ? '+' : '-'}${tx.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </td>
+                            <td className="py-3">
+                              <Badge variant="outline" className={`text-[10px] ${
+                                tx.status === 'COMPLETED' ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10' :
+                                tx.status === 'PENDING' ? 'border-yellow-500/40 text-yellow-400 bg-yellow-500/10' :
+                                'border-[#ff2d55]/40 text-[#ff2d55] bg-[#ff2d55]/10 cursor-pointer hover:underline'
+                              }`} title={tx.status === 'BLOCKED' ? 'Click to view block rationale' : ''}>
+                                {tx.status}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {selectedBlockedTransfer && (
+                    <div className="mt-4 p-3 bg-red-950/30 border border-[#ff2d55]/40 rounded text-xs font-mono space-y-1">
+                      <div className="flex items-center justify-between text-[#ff2d55] font-bold">
+                        <span>Blocked Transfer Telemetry</span>
+                        <button onClick={() => setSelectedBlockedTransfer(null)} className="text-[10px] underline text-slate-400">Close</button>
+                      </div>
+                      <div><span className="text-slate-400">Threat Category:</span> {selectedBlockedTransfer.threat_category}</div>
+                      <div><span className="text-slate-400">Rationale:</span> {selectedBlockedTransfer.rationale}</div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
 
           </div>
 
           {/* MIDDLE ROW — 2 PANELS */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
-            {/* LEFT PANEL: THREAT BREAKDOWN */}
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
@@ -872,7 +1314,7 @@ export default function Index() {
               <CardContent className="h-[240px] pt-4">
                 {totalRequestsCount === 0 ? (
                   <div className="h-full flex items-center justify-center text-xs font-mono text-slate-500 italic">
-                    No analyses yet. Head to the Analyzer to run your first request.
+                    No analyses yet. Run an analysis in the Analyzer view.
                   </div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
@@ -893,7 +1335,6 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            {/* RIGHT PANEL: KILL-CHAIN STAGE HITS */}
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
@@ -1002,7 +1443,7 @@ export default function Index() {
         </main>
       )}
 
-      {/* ================= ANALYZER VIEW ================= */}
+      {/* ================= ANALYZER VIEW (WITH SECTION D - SUGGESTED TRANSFERS) ================= */}
       {currentView === 'analyzer' && (
         <main className="relative z-30 flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           
@@ -1094,7 +1535,7 @@ export default function Index() {
             </Card>
           </div>
 
-          {/* RIGHT COLUMN: RESULTS PANEL & 5-STAGE PIPELINE (7 cols) */}
+          {/* RIGHT COLUMN: RESULTS PANEL, PIPELINE & SECTION D (7 cols) */}
           <div className="lg:col-span-7 flex flex-col gap-6">
             
             {/* VERDICT & JSON DISPLAY CARD */}
@@ -1320,6 +1761,39 @@ export default function Index() {
                     );
                   })}
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* PART 2 — SECTION D: SUGGESTED TRANSFERS PANEL */}
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-[#00f0ff]" />
+                  SUGGESTED TRANSFERS
+                </CardTitle>
+                <CardDescription className="text-xs text-slate-400">One-click prefill suggestions based on history.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {SUGGESTED_TRANSFERS.map((sug, i) => (
+                  <div key={i} className="bg-slate-950/60 border border-slate-800 p-3 rounded flex flex-col justify-between gap-2 font-mono">
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-white">{sug.name}</span>
+                        <span className="text-[10px] text-[#00f0ff]">{sug.account}</span>
+                      </div>
+                      <div className="text-xs text-emerald-400 font-bold">${sug.amount.toFixed(2)}</div>
+                      <div className="text-[10px] text-slate-500">({sug.label})</div>
+                    </div>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={() => setInputText(sug.text)}
+                      className="h-7 bg-slate-900 border-slate-800 hover:border-[#00f0ff] text-[11px] text-slate-300"
+                    >
+                      Prefill Request
+                    </Button>
+                  </div>
+                ))}
               </CardContent>
             </Card>
 
