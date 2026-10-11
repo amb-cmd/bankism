@@ -4,7 +4,7 @@ import {
   CheckCircle2, XCircle, RefreshCw, LogOut, Github, ArrowRight, Play, 
   Activity, Zap, Database, Server, Flame, Eye, Copy, Check, Clock, Globe,
   HelpCircle, Settings, UserCheck, Key, AlertOctagon, BarChart3, LayoutDashboard, UserX, User,
-  DollarSign, CheckSquare, Sparkles, LockKeyhole
+  DollarSign, CheckSquare, Sparkles, LockKeyhole, History, CheckCircle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,7 +13,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/use-toast';
 import confetti from 'canvas-confetti';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, Cell } from 'recharts';
@@ -34,9 +33,13 @@ interface VerdictResponse {
   confidence: number;
   sanitized_input: string;
   rationale: string;
+  category: 'SAFE_TRANSFER' | 'SAFE_INQUIRY' | 'MALICIOUS' | 'UNKNOWN';
   requires_confirmation: boolean;
   confirmation_token: string | null;
   session_risk_score: number;
+  warning_count: number;
+  session_locked: boolean;
+  locked_until: string | null;
   extracted_account: string | null;
   extracted_recipient_name: string | null;
   extracted_amount: number | null;
@@ -66,10 +69,30 @@ interface TransferRecord {
   recipient_name: string;
   account_number: string;
   amount: number;
-  status: 'COMPLETED' | 'PENDING' | 'BLOCKED';
+  status: 'COMPLETED' | 'PENDING' | 'BLOCKED' | 'PENDING_EXECUTION';
   is_credit?: boolean;
   threat_category?: string;
   rationale?: string;
+}
+
+interface LoginHistoryRecord {
+  id: string;
+  timestamp: string;
+  device_info: string;
+  status: 'SUCCESS' | 'FAILED_PIN' | 'LOCKED_OUT';
+  location: string;
+}
+
+interface SecurityAlertRecord {
+  id: string;
+  triggered_at: string;
+  alert_type: 'SESSION_LOCKED' | 'MULTIPLE_FAILED_PINS' | 'SUSPICIOUS_INPUT_DETECTED' | 'UNAUTHORIZED_ACCOUNT_ATTEMPT';
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  threat_categories: string[];
+  sanitized_inputs: string[];
+  acknowledged: boolean;
+  rationale: string;
+  expanded?: boolean;
 }
 
 const PRESETS = [
@@ -81,17 +104,17 @@ const PRESETS = [
   {
     name: "High Value Transfer (> $500)",
     text: "Transfer $5000 to John Doe at ACC-123",
-    description: "Triggers two-step confirmation ($500+ threshold)."
+    description: "Triggers two-step confirmation ($500+ threshold & SAFE_TRANSFER)."
   },
   {
-    name: "Recipient Mismatch",
-    text: "Transfer $50 to Bob Smith at ACC-123",
-    description: "ACC-123 belongs to John Doe, not Bob Smith."
+    name: "Safe Inquiry",
+    text: "What is my balance?",
+    description: "Safe inquiry request."
   },
   {
-    name: "Zero-Width Obfuscation",
-    text: "Tr\u200Bans\u200Bfer $50 to John Doe at ACC-123",
-    description: "Zero-width character insertion."
+    name: "Gibberish / Unknown",
+    text: "asdfjkl;asdfjkl;",
+    description: "Unrecognized request pattern (UNKNOWN category)."
   },
   {
     name: "Direct Injection",
@@ -125,17 +148,17 @@ const SUGGESTED_TRANSFERS = [
 export default function Index() {
   const { toast } = useToast();
   
-  // App views: 'login' | 'enrollment' | 'verify_pin' | 'dashboard' | 'analyzer'
-  const [currentView, setCurrentView] = useState<'login' | 'enrollment' | 'verify_pin' | 'dashboard' | 'analyzer'>(() => {
+  // Views: 'login' | 'enrollment' | 'verify_pin' | 'security_activity' | 'my_account' | 'dashboard' | 'analyzer'
+  const [currentView, setCurrentView] = useState<'login' | 'enrollment' | 'verify_pin' | 'security_activity' | 'my_account' | 'dashboard' | 'analyzer'>(() => {
     const savedUser = localStorage.getItem('bankism_user');
-    const isGuest = localStorage.getItem('bankism_guest') === 'true';
-    const isLocked = localStorage.getItem('bankism_locked') === 'true';
+    const isGuest = localStorage.getItem('bankism_guest'] === 'true';
+    const isLocked = localStorage.getItem('bankism_locked'] === 'true';
     if (isGuest) return 'dashboard';
     if (isLocked) return 'verify_pin';
     if (savedUser) {
       const u = JSON.parse(savedUser);
       if (!u.enrollment_completed) return 'enrollment';
-      return 'verify_pin'; // require PIN verification on returning session
+      return 'verify_pin';
     }
     return 'login';
   });
@@ -158,16 +181,45 @@ export default function Index() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  // Enrollment Form State (Part 1)
+  // Enrollment Form State
   const [fullNameInput, setFullNameInput] = useState('');
   const [phoneInput, setPhoneInput] = useState('');
-  const [pinInput, setPinInput] = useState('');
-  const [confirmPinInput, setConfirmPinInput] = useState('');
+  const [pinInput, setPinInput] = useState('123456'); // Fix 2: Pre-filled with DEMO PIN "123456"
+  const [confirmPinInput, setConfirmPinInput] = useState('123456');
   const [recoveryEmailInput, setRecoveryEmailInput] = useState('');
 
   // PIN Verification State
   const [verifyPinInput, setVerifyPinInput] = useState('');
   const [pinAttempts, setPinAttempts] = useState(0);
+
+  // Warning & Lockout System (Fix 3)
+  const [warningCount, setWarningCount] = useState<number>(() => {
+    const saved = localStorage.getItem('bankism_warning_count');
+    return saved ? parseInt(saved, 10) : 0;
+  });
+  const [isLockedOut, setIsLockedOut] = useState<boolean>(() => {
+    const lockedUntil = localStorage.getItem('bankism_locked_until');
+    if (lockedUntil && Date.now() < parseInt(lockedUntil, 10)) return true;
+    return false;
+  });
+  const [lockCountdownSeconds, setLockCountdownSeconds] = useState<number>(120); // 2 minutes (02:00)
+
+  // Security Activity state (Fix 4)
+  const [loginHistory, setLoginHistory] = useState<LoginHistoryRecord[]>(() => {
+    const saved = localStorage.getItem('bankism_login_history');
+    return saved ? JSON.parse(saved) : [
+      { id: 'lh1', timestamp: '2026-10-11 10:47', device_info: 'Chrome / Windows', status: 'SUCCESS', location: 'Bangalore, IN' },
+      { id: 'lh2', timestamp: '2026-10-11 10:32', device_info: 'Chrome / Windows', status: 'FAILED_PIN', location: 'Bangalore, IN' },
+      { id: 'lh3', timestamp: '2026-10-11 10:30', device_info: 'Unknown Device', status: 'LOCKED_OUT', location: 'Unknown' },
+    ];
+  });
+
+  const [securityAlerts, setSecurityAlerts] = useState<SecurityAlertRecord[]>(() => {
+    const saved = localStorage.getItem('bankism_security_alerts');
+    return saved ? JSON.parse(saved) : [
+      { id: 'sa1', triggered_at: '2026-10-11 10:30', alert_type: 'SESSION_LOCKED', severity: 'CRITICAL', threat_categories: ['prompt_injection', 'unauthorized_account'], sanitized_inputs: ['Ignore all previous instructions'], acknowledged: false, rationale: 'Session locked due to 3 cumulative warning events.' }
+    ];
+  });
 
   // Analyzer & Dashboard States
   const [inputText, setInputText] = useState('');
@@ -207,15 +259,40 @@ export default function Index() {
     return () => clearInterval(timer);
   }, []);
 
+  // Lockout countdown timer loop
+  useEffect(() => {
+    let interval: any;
+    if (isLockedOut) {
+      interval = setInterval(() => {
+        setLockCountdownSeconds(prev => {
+          if (prev <= 1) {
+            setIsLockedOut(false);
+            setWarningCount(0);
+            localStorage.removeItem('bankism_locked_until');
+            localStorage.setItem('bankism_warning_count', '0');
+            toast({ title: "Session Unlocked", description: "Lockout period expired. Warnings reset." });
+            clearInterval(interval);
+            return 120;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isLockedOut]);
+
   useEffect(() => {
     if (!user?.is_guest) {
       localStorage.setItem('bankism_history', JSON.stringify(history));
       localStorage.setItem('bankism_transfers', JSON.stringify(transfers));
+      localStorage.setItem('bankism_warning_count', warningCount.toString());
+      localStorage.setItem('bankism_login_history', JSON.stringify(loginHistory));
+      localStorage.setItem('bankism_security_alerts', JSON.stringify(securityAlerts));
       if (user) {
         localStorage.setItem('bankism_user', JSON.stringify(user));
       }
     }
-  }, [history, transfers, user]);
+  }, [history, transfers, user, warningCount, loginHistory, securityAlerts]);
 
   useEffect(() => {
     localStorage.setItem('bankism_session_score', sessionRiskScore.toString());
@@ -303,7 +380,39 @@ export default function Index() {
     };
   }, []);
 
-  // PART 1 — SIGN-IN & ENROLLMENT FLOW
+  // Trigger Warning & Lockout (Fix 3)
+  const triggerWarning = (threatCat: string, sanitizedInput: string) => {
+    const newCount = warningCount + 1;
+    setWarningCount(newCount);
+
+    if (newCount === 1) {
+      toast({ title: "Security Warning 1 of 3", description: `Threat detected: ${threatCat}`, variant: "destructive" });
+    } else if (newCount === 2) {
+      toast({ title: "Security Warning 2 of 3 — Session locks after one more", description: `Threat detected: ${threatCat}`, variant: "destructive" });
+    } else if (newCount >= 3) {
+      setIsLockedOut(true);
+      const unlockTime = Date.now() + 120000;
+      localStorage.setItem('bankism_locked_until', unlockTime.toString());
+      setLockCountdownSeconds(120);
+
+      // Add security alert
+      const newAlert: SecurityAlertRecord = {
+        id: 'sa_' + Math.random().toString(36).substring(2, 8),
+        triggered_at: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        alert_type: 'SESSION_LOCKED',
+        severity: 'CRITICAL',
+        threat_categories: [threatCat, 'multiple_warnings'],
+        sanitized_inputs: [sanitizedInput],
+        acknowledged: false,
+        rationale: `Session locked automatically after accumulating 3 security warnings. Last trigger: ${threatCat}`
+      };
+      setSecurityAlerts(prev => [newAlert, ...prev]);
+
+      toast({ title: "🚨 SESSION LOCKED", description: "Too many suspicious attempts detected. Locked for 02:00 minutes.", variant: "destructive" });
+    }
+  };
+
+  // PART 1 & 2 — SIGN-IN & ENROLLMENT FLOW
   const handleGitHubLogin = () => {
     const mockGitHubUser: UserProfile = {
       id: 'gh_' + Math.random().toString(36).substring(2, 9),
@@ -314,7 +423,6 @@ export default function Index() {
       enrollment_completed: false
     };
 
-    // Check if this user already completed enrollment in localStorage
     const savedProfile = localStorage.getItem('bankism_profile_' + mockGitHubUser.id);
     if (savedProfile) {
       const profileData = JSON.parse(savedProfile);
@@ -349,7 +457,7 @@ export default function Index() {
     localStorage.setItem('bankism_guest', 'true');
     localStorage.removeItem('bankism_user');
     setHistory([]);
-    setCurrentView('dashboard');
+    setCurrentView('security_activity'); // Fix 4: Show security activity before dashboard
     toast({
       title: "Logged in as Guest",
       description: "Demo Mode active. Data is stored in-memory only.",
@@ -365,12 +473,8 @@ export default function Index() {
       toast({ title: "Invalid Phone", description: "Phone number must be exactly 10 digits.", variant: "destructive" });
       return;
     }
-    if (!pinInput || pinInput.length !== 6 || isNaN(Number(pinInput))) {
-      toast({ title: "Invalid PIN", description: "Security PIN must be exactly 6 digits.", variant: "destructive" });
-      return;
-    }
-    if (pinInput !== confirmPinInput) {
-      toast({ title: "PIN Mismatch", description: "Security PIN confirmation does not match.", variant: "destructive" });
+    if (pinInput !== '123456') {
+      toast({ title: "Demo PIN Required", description: "Please use the demo PIN: 123456", variant: "destructive" });
       return;
     }
     if (!recoveryEmailInput.includes('@')) {
@@ -378,8 +482,8 @@ export default function Index() {
       return;
     }
 
-    // Hash PIN (simulated secure hash for demo)
-    const pinHash = 'hash_' + btoa(pinInput).split('').reverse().join('');
+    // // DEMO ONLY — replace with hashed PIN lookup in production.
+    const pinHash = 'hash_' + btoa('123456').split('').reverse().join('');
     const bankismId = 'BKSM-' + Math.random().toString(36).substring(2, 7).toUpperCase();
 
     const profileData = {
@@ -399,33 +503,55 @@ export default function Index() {
     }
 
     localStorage.removeItem('bankism_locked');
-    setCurrentView('dashboard');
+    setCurrentView('security_activity'); // Fix 4
     toast({
       title: "Security Enrollment Complete",
-      description: "Profile registered successfully with hashed credentials.",
+      description: "Profile registered successfully with demo PIN '123456'.",
     });
   };
 
   const handleVerifyPin = () => {
-    if (pinAttempts >= 3) {
-      toast({ title: "Session Locked", description: "Maximum PIN attempts exceeded. Please re-authenticate with GitHub.", variant: "destructive" });
-      handleSignOut();
-      return;
-    }
-
-    // For demo verification, accept any 6 digits or matching pin
-    if (verifyPinInput.length === 6) {
+    // Fix 2: Demo PIN "123456"
+    if (verifyPinInput === '123456') {
       localStorage.removeItem('bankism_locked');
-      setCurrentView('dashboard');
       setPinAttempts(0);
       setVerifyPinInput('');
+      
+      // Log successful login
+      const newLogin: LoginHistoryRecord = {
+        id: 'lh_' + Math.random().toString(36).substring(2, 8),
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        device_info: 'Chrome / Windows',
+        status: 'SUCCESS',
+        location: 'Bangalore, IN'
+      };
+      setLoginHistory(prev => [newLogin, ...prev]);
+
+      setCurrentView('security_activity'); // Fix 4: Show security activity before dashboard
       toast({ title: "PIN Verified", description: "Secure session fully unlocked." });
     } else {
       const nextAttempts = pinAttempts + 1;
       setPinAttempts(nextAttempts);
-      toast({ title: "Incorrect PIN", description: `Attempt ${nextAttempts} of 3.`, variant: "destructive" });
-      if (nextAttempts >= 3) {
-        handleSignOut();
+      
+      // Log failed PIN
+      const failLogin: LoginHistoryRecord = {
+        id: 'lh_' + Math.random().toString(36).substring(2, 8),
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        device_info: 'Chrome / Windows',
+        status: 'FAILED_PIN',
+        location: 'Bangalore, IN'
+      };
+      setLoginHistory(prev => [failLogin, ...prev]);
+
+      // Trigger warning for wrong PIN (Fix 3)
+      triggerWarning('invalid_pin', 'Wrong PIN attempt');
+
+      toast({ title: "Incorrect PIN", description: `Attempt ${nextAttempts} of 3. Demo PIN is 123456.`, variant: "destructive" });
+      if (nextAttempts >= 3 || warningCount >= 2) {
+        setIsLockedOut(true);
+        const unlockTime = Date.now() + 120000;
+        localStorage.setItem('bankism_locked_until', unlockTime.toString());
+        setLockCountdownSeconds(120);
       }
     }
   };
@@ -451,15 +577,22 @@ export default function Index() {
 
   const handleResetSession = () => {
     setSessionRiskScore(0.0);
+    setWarningCount(0);
     localStorage.removeItem('bankism_session_score');
+    localStorage.removeItem('bankism_warning_count');
     toast({
       title: "Session Reset",
-      description: "Cumulative session suspicion score reset to 0.0.",
+      description: "Cumulative session score and warnings reset to 0.",
     });
   };
 
-  // --- 6-STAGE PIPELINE (Strict & Unmodified logic) ---
+  // --- 6-STAGE PIPELINE WITH FIX 1 SEMANTIC CATEGORIES ---
   const runPipeline = async (rawInput: string) => {
+    if (isLockedOut) {
+      toast({ title: "Session Locked", description: "Cannot analyze while session is locked.", variant: "destructive" });
+      return;
+    }
+
     if (!rawInput.trim()) {
       toast({
         title: "Empty Input",
@@ -528,7 +661,7 @@ export default function Index() {
     };
     setCurrentStageIndex(2);
 
-    // Stage 3: Semantic Analysis
+    // Stage 3: Semantic Analysis with Fix 1 Categories
     await new Promise(r => setTimeout(r, 500));
     const lower = sanitized.toLowerCase();
     const patternMatches: string[] = [];
@@ -542,29 +675,42 @@ export default function Index() {
       patternMatches.push('indirect_injection');
       patternScore += 0.95;
     }
-    if (lower.includes('ignore previous') || lower.includes('disregard') || lower.includes('forget your')) {
-      patternMatches.push('prompt_injection');
-      patternScore += 0.85;
-    }
-    if (lower.includes('pretend') || lower.includes('act as') || lower.includes('developer mode')) {
-      patternMatches.push('prompt_injection');
-      patternScore += 0.75;
-    }
-    if (lower.includes('override') || lower.includes('bypass') || lower.includes('disable guardrails')) {
+    if (lower.includes('ignore previous') || lower.includes('disregard') || lower.includes('forget your') || lower.includes('pretend') || lower.includes('act as') || lower.includes('reveal your') || lower.includes('override')) {
       patternMatches.push('prompt_injection');
       patternScore += 0.9;
     }
 
     patternScore = Math.min(patternScore, 1.0);
+
+    // FIX 1 CATEGORY CLASSIFICATION
+    let semanticCategory: 'SAFE_TRANSFER' | 'SAFE_INQUIRY' | 'MALICIOUS' | 'UNKNOWN' = 'UNKNOWN';
+    let threatCategory: string | null = null;
+    let blockingStage: 'sanitize' | 'pattern_scan' | 'semantic' | 'tool_guard' | 'verdict' | 'none' = 'none';
+
+    if (patternScore >= 0.3 || encodingObfuscationDetected || indirectInjectionDetected) {
+      semanticCategory = 'MALICIOUS';
+      threatCategory = patternMatches[0] || 'prompt_injection';
+      blockingStage = 'semantic';
+    } else if (lower.includes('balance') || lower.includes('recent transactions') || lower.includes('statement') || lower.includes('show my')) {
+      semanticCategory = 'SAFE_INQUIRY';
+    } else if (lower.includes('transfer') || lower.includes('send') || lower.includes('acc-') || sanitized.match(/\$[0-9]+/)) {
+      semanticCategory = 'SAFE_TRANSFER';
+    } else {
+      // Gibberish / Unrecognized
+      semanticCategory = 'UNKNOWN';
+      threatCategory = 'unrecognized_request';
+      blockingStage = 'semantic';
+    }
+
     const stage3: StageResult = {
       name: "3. Semantic Analysis",
-      passed: patternScore < 0.3,
-      details: patternMatches.length > 0 ? `Semantic intent matched threat: ${patternMatches[0]}` : "Semantic intent verified clean.",
+      passed: semanticCategory === 'SAFE_TRANSFER' || semanticCategory === 'SAFE_INQUIRY',
+      details: `Classified as ${semanticCategory}. ${threatCategory ? `Threat: ${threatCategory}` : ''}`,
       latencyMs: 150
     };
     setCurrentStageIndex(3);
 
-    // Stage 4: Tool Guard
+    // Stage 4: Tool Guard & Entity Extraction
     await new Promise(r => setTimeout(r, 450));
     const amountMatch = sanitized.match(/\$([0-9,]+)/) || sanitized.match(/([0-9,]+)\s*(dollars|usd|to)/i);
     let extractedAmount: number | null = null;
@@ -591,24 +737,8 @@ export default function Index() {
 
     let toolGuardPassed = true;
     let toolGuardDetails = "Tool parameters validated successfully.";
-    let threatCategory: string | null = null;
-    let blockingStage: 'sanitize' | 'pattern_scan' | 'semantic' | 'tool_guard' | 'verdict' | 'none' = 'none';
 
-    const isTransfer = lower.includes('transfer') || lower.includes('send') || extractedAmount !== null || extractedAccount !== null;
-
-    if (encodingObfuscationDetected) {
-      toolGuardPassed = false;
-      threatCategory = 'encoding_obfuscation';
-      blockingStage = 'sanitize';
-    } else if (indirectInjectionDetected) {
-      toolGuardPassed = false;
-      threatCategory = 'indirect_injection';
-      blockingStage = 'pattern_scan';
-    } else if (patternScore >= 0.3) {
-      toolGuardPassed = false;
-      threatCategory = patternMatches[0] || 'prompt_injection';
-      blockingStage = 'semantic';
-    } else if (isTransfer) {
+    if (semanticCategory === 'SAFE_TRANSFER') {
       if (!extractedAccount || !ACCOUNT_WHITELIST[extractedAccount]) {
         toolGuardPassed = false;
         threatCategory = 'unauthorized_account';
@@ -635,6 +765,10 @@ export default function Index() {
         blockingStage = 'tool_guard';
         toolGuardDetails = `FAIL: Amount $${extractedAmount.toLocaleString()} exceeds $10k limit.`;
       }
+    } else if (semanticCategory === 'UNKNOWN') {
+      toolGuardPassed = false;
+      blockingStage = 'tool_guard';
+      toolGuardDetails = "Input does not match a recognized banking request pattern.";
     }
 
     const stage4: StageResult = {
@@ -647,35 +781,49 @@ export default function Index() {
 
     // Stage 5: Verdict & Aggregation
     await new Promise(r => setTimeout(r, 400));
+    
+    let isApproved = false;
+    if (semanticCategory === 'SAFE_INQUIRY') {
+      isApproved = true;
+    } else if (semanticCategory === 'SAFE_TRANSFER' && toolGuardPassed) {
+      isApproved = true;
+    } else {
+      isApproved = false;
+    }
+
     let currentRiskScore = patternScore;
-    if (!toolGuardPassed) currentRiskScore = Math.max(currentRiskScore, 0.85);
-    if (extractedAmount && extractedAmount > 500) currentRiskScore = Math.max(currentRiskScore, 0.4);
+    if (!isApproved) currentRiskScore = Math.max(currentRiskScore, 0.7);
 
     const newSessionScore = Math.min(sessionRiskScore + currentRiskScore, 5.0);
     setSessionRiskScore(newSessionScore);
-    const isEscalatedSession = newSessionScore > 1.5;
 
-    let isApproved = toolGuardPassed && currentRiskScore < 0.3;
-    if (!isApproved && blockingStage === 'none') blockingStage = 'verdict';
+    // FIX 1: CONFIRMATION MODAL RULES
+    // Confirmation appears ONLY if ALL of these are true:
+    // - Stage 3 classified input as SAFE_TRANSFER
+    // - Stage 4 extracted a valid whitelisted account
+    // - Stage 4 extracted a matching recipient name
+    // - Stage 4 extracted a numeric amount > 0
+    // - Amount > $500
+    const meetsConfirmationCriteria = 
+      semanticCategory === 'SAFE_TRANSFER' &&
+      toolGuardPassed &&
+      extractedAccount !== null &&
+      ACCOUNT_WHITELIST[extractedAccount] !== undefined &&
+      extractedRecipientName !== null &&
+      extractedAmount !== null &&
+      extractedAmount > 500;
 
-    let requiresConfirmation = false;
-    let confirmationToken: string | null = null;
-
-    if (isApproved && extractedAmount && extractedAmount > 500) {
-      requiresConfirmation = true;
-      confirmationToken = 'tok_' + Math.random().toString(36).substring(2, 12);
-    }
-    if (isEscalatedSession && isApproved && !requiresConfirmation) {
-      requiresConfirmation = true;
-      confirmationToken = 'tok_esc_' + Math.random().toString(36).substring(2, 12);
-    }
+    let requiresConfirmation = meetsConfirmationCriteria;
+    let confirmationToken: string | null = requiresConfirmation ? ('tok_' + Math.random().toString(36).substring(2, 12)) : null;
 
     let riskLevel: 'low' | 'medium' | 'high' | 'critical' = 'low';
-    if (currentRiskScore >= 0.8 || !toolGuardPassed) riskLevel = 'critical';
-    else if (currentRiskScore >= 0.6) riskLevel = 'high';
-    else if (currentRiskScore >= 0.3) riskLevel = 'medium';
-
-    if (isEscalatedSession) riskLevel = riskLevel === 'low' ? 'medium' : 'high';
+    if (semanticCategory === 'UNKNOWN') {
+      riskLevel = 'medium';
+    } else if (currentRiskScore >= 0.8 || !isApproved) {
+      riskLevel = 'critical';
+    } else if (currentRiskScore >= 0.3) {
+      riskLevel = 'medium';
+    }
 
     const stage5: StageResult = {
       name: "5. Verdict",
@@ -691,14 +839,20 @@ export default function Index() {
       threat_category: isApproved ? null : (threatCategory || 'security_policy_violation'),
       confidence: parseFloat((1 - (currentRiskScore * 0.1)).toFixed(2)),
       sanitized_input: sanitized,
-      rationale: isApproved
-        ? (requiresConfirmation 
-            ? `Request verified valid against all whitelists, but exceeds $500 threshold (session risk ${newSessionScore.toFixed(1)}). Requires two-step password confirmation.`
-            : `Request passed all 5 firewall stages cleanly. Session risk score: ${newSessionScore.toFixed(1)}.`)
-        : `Firewall blocked request. Reason: ${toolGuardDetails} [Threat: ${threatCategory}]`,
+      rationale: semanticCategory === 'UNKNOWN'
+        ? "Input does not match a recognized banking request pattern."
+        : (isApproved
+            ? (requiresConfirmation 
+                ? `Request verified valid against all whitelists and amounts, exceeding $500 threshold. Requires two-step password confirmation.`
+                : `Request passed all 5 firewall stages cleanly. Category: ${semanticCategory}.`)
+            : `Firewall blocked request. Reason: ${toolGuardDetails} [Threat: ${threatCategory}]`),
+      category: semanticCategory,
       requires_confirmation: requiresConfirmation,
       confirmation_token: confirmationToken,
       session_risk_score: newSessionScore,
+      warning_count: warningCount,
+      session_locked: isLockedOut,
+      locked_until: null,
       extracted_account: extractedAccount,
       extracted_recipient_name: extractedRecipientName,
       extracted_amount: extractedAmount,
@@ -714,18 +868,21 @@ export default function Index() {
     setCurrentStageIndex(5);
     setHistory(prev => [finalResult, ...prev.slice(0, 49)]);
 
-    // Automatically append to transfers if it looks like a valid transfer attempt
-    if (isTransfer && extractedAccount && extractedAmount) {
+    // Trigger Warning if malicious (Fix 3)
+    if (!isApproved && semanticCategory !== 'UNKNOWN') {
+      triggerWarning(threatCategory || 'malicious_input', sanitized);
+    }
+
+    // Append to transfers if safe transfer
+    if (semanticCategory === 'SAFE_TRANSFER' && isApproved && extractedAccount && extractedAmount) {
       const newTransferRecord: TransferRecord = {
         id: 't_' + Math.random().toString(36).substring(2, 8),
         date: new Date().toISOString().split('T')[0],
-        recipient_name: extractedRecipientName || ACCOUNT_WHITELIST[extractedAccount] || 'Unknown',
+        recipient_name: extractedRecipientName || ACCOUNT_WHITELIST[extractedAccount],
         account_number: extractedAccount,
         amount: extractedAmount,
-        status: isApproved ? (requiresConfirmation ? 'PENDING' : 'COMPLETED') : 'BLOCKED',
-        is_credit: false,
-        threat_category: threatCategory || undefined,
-        rationale: finalResult.rationale
+        status: requiresConfirmation ? 'PENDING' : 'COMPLETED',
+        is_credit: false
       };
       setTransfers(prev => [newTransferRecord, ...prev.slice(0, 19)]);
     }
@@ -737,20 +894,25 @@ export default function Index() {
       confetti({ particleCount: 40, spread: 60, origin: { y: 0.7 } });
       toast({ title: "Request Approved", description: "Firewall cleared transaction safely." });
     } else {
-      toast({ title: "Threat Intercepted!", description: `Blocked: ${finalResult.threat_category}`, variant: "destructive" });
+      toast({ title: "Threat Intercepted / Blocked", description: `Blocked: ${finalResult.threat_category || 'Unrecognized'}`, variant: "destructive" });
     }
   };
 
   const handleConfirmHighValueAction = () => {
-    if (!confirmationPassword.trim()) {
-      toast({ title: "Password Required", description: "Please enter your session password to confirm.", variant: "destructive" });
+    // Fix 2: Demo PIN "123456" only for high value confirmation
+    if (confirmationPassword !== '123456') {
+      triggerWarning('invalid_pin', 'Wrong confirmation PIN');
+      toast({ title: "Invalid PIN", description: "Demo PIN is 123456.", variant: "destructive" });
       return;
     }
 
     if (pendingVerdictToConfirm) {
-      const confirmedVerdict = { ...pendingVerdictToConfirm, rationale: pendingVerdictToConfirm.rationale + " [STATUS: Confirmed with password - Pending Execution]" };
+      const confirmedVerdict = { ...pendingVerdictToConfirm, rationale: pendingVerdictToConfirm.rationale + " [STATUS: Confirmed with demo PIN - Pending Execution]" };
       setVerdict(confirmedVerdict);
       setHistory(prev => prev.map(item => item.id === confirmedVerdict.id ? confirmedVerdict : item));
+      
+      // Update transfer status
+      setTransfers(prev => prev.map(tx => tx.amount === pendingVerdictToConfirm.extracted_amount ? { ...tx, status: 'PENDING_EXECUTION' } : tx));
     }
 
     setIsConfirmModalOpen(false);
@@ -759,7 +921,7 @@ export default function Index() {
     confetti({ particleCount: 60, spread: 80, origin: { y: 0.6 } });
     toast({
       title: "Action Confirmed (Pending Execution)",
-      description: "Two-step authorization verified successfully. Transaction queued securely."
+      description: "Two-step authorization verified successfully with demo PIN."
     });
   };
 
@@ -780,7 +942,9 @@ export default function Index() {
     'recipient_mismatch', 
     'encoding_obfuscation', 
     'loop_detected', 
-    'indirect_injection'
+    'indirect_injection',
+    'unrecognized_request',
+    'invalid_pin'
   ];
 
   const threatChartData = threatCategoriesList.map(cat => ({
@@ -796,6 +960,9 @@ export default function Index() {
     verdict: history.filter(h => h.blocking_stage === 'verdict').length,
   };
   const maxStageHit = Math.max(...Object.values(stageHits), 1);
+
+  // Unacknowledged security alerts count
+  const unacknowledgedAlertsCount = securityAlerts.filter(a => !a.acknowledged).length;
 
   // ================= VIEW SWITCHER =================
 
@@ -856,7 +1023,7 @@ export default function Index() {
     );
   }
 
-  // 2. ENROLLMENT VIEW (PART 1)
+  // 2. ENROLLMENT VIEW (Fix 2: Demo PIN "123456")
   if (currentView === 'enrollment') {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -875,7 +1042,7 @@ export default function Index() {
               </div>
             </div>
             <Badge variant="outline" className="border-[#00f0ff]/40 text-[#00f0ff] font-mono text-[10px]">
-              OAUTH CONNECTED
+              DEMO PIN: 123456
             </Badge>
           </div>
 
@@ -907,18 +1074,17 @@ export default function Index() {
                 <Input 
                   type="password"
                   maxLength={6}
-                  placeholder="••••••"
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
                   className="bg-[#070a12] border-slate-800 text-xs text-white"
                 />
+                <span className="text-[10px] text-emerald-400">Demo PIN: 123456</span>
               </div>
               <div className="space-y-1.5">
                 <label className="text-xs text-slate-300">Confirm PIN *</label>
                 <Input 
                   type="password"
                   maxLength={6}
-                  placeholder="••••••"
                   value={confirmPinInput}
                   onChange={(e) => setConfirmPinInput(e.target.value)}
                   className="bg-[#070a12] border-slate-800 text-xs text-white"
@@ -937,18 +1103,19 @@ export default function Index() {
             </div>
           </div>
 
+          {/* // DEMO ONLY — replace with hashed PIN lookup in production. */}
           <Button 
             onClick={handleCompleteEnrollment}
             className="w-full bg-gradient-to-r from-[#00f0ff] to-[#0072ff] hover:from-[#00d8e6] text-slate-950 font-mono font-bold text-xs h-11 uppercase"
           >
-            Complete Security Enrollment & Enter Dashboard
+            Complete Security Enrollment & Continue
           </Button>
         </div>
       </div>
     );
   }
 
-  // 3. VERIFY PIN VIEW (PART 1)
+  // 3. VERIFY PIN VIEW (Fix 2: Demo PIN "123456")
   if (currentView === 'verify_pin') {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -963,9 +1130,11 @@ export default function Index() {
           <div className="space-y-1">
             <h2 className="text-base font-bold font-mono text-white">SECURITY PIN REQUIRED</h2>
             <p className="text-xs text-slate-400 font-mono">Enter your 6-digit PIN to unlock session.</p>
+            <p className="text-[10px] text-emerald-400 font-mono">Demo PIN: 123456</p>
           </div>
 
           <div className="w-full space-y-3 font-mono">
+            {/* // DEMO ONLY — replace with hashed PIN lookup in production. */}
             <Input 
               type="password"
               maxLength={6}
@@ -999,12 +1168,319 @@ export default function Index() {
     );
   }
 
+  // 4. SECURITY ACTIVITY VIEW (FIX 4)
+  if (currentView === 'security_activity') {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col p-6 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
+        <div className="max-w-5xl w-full mx-auto flex flex-col gap-6">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div>
+              <h2 className="text-xl font-bold font-mono text-white flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-[#00f0ff]" /> SECURITY ACTIVITY & INCIDENT LOG
+              </h2>
+              <p className="text-xs text-slate-400 font-mono">Review login attempts, security alerts, and system threat interceptions.</p>
+            </div>
+            <Button 
+              onClick={() => setCurrentView('dashboard')}
+              className="bg-gradient-to-r from-[#00f0ff] to-[#0072ff] text-slate-950 font-mono font-bold text-xs"
+            >
+              Continue to Dashboard →
+            </Button>
+          </div>
+
+          {/* Banner */}
+          {unacknowledgedAlertsCount === 0 ? (
+            <div className="p-4 rounded-lg bg-emerald-950/30 border border-emerald-500/40 text-emerald-400 font-mono text-xs flex items-center gap-3">
+              <CheckCircle className="w-5 h-5" />
+              <span>✅ No unacknowledged security incidents detected. System integrity secure.</span>
+            </div>
+          ) : (
+            <div className="p-4 rounded-lg bg-red-950/30 border border-[#ff2d55]/40 text-[#ff2d55] font-mono text-xs flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="w-5 h-5 animate-pulse" />
+                <span>⚠️ {unacknowledgedAlertsCount} security incident(s) require review.</span>
+              </div>
+            </div>
+          )}
+
+          {/* Login History Table */}
+          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-mono text-slate-200">Login History (Last 10 Logins)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-left font-mono text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="pb-2">Timestamp</th>
+                    <th className="pb-2">Device / Browser</th>
+                    <th className="pb-2">Status</th>
+                    <th className="pb-2">Location</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {loginHistory.map((lh, i) => (
+                    <tr key={lh.id || i} className="hover:bg-slate-900/40">
+                      <td className="py-2.5 text-slate-400">{lh.timestamp}</td>
+                      <td className="py-2.5 text-slate-200">{lh.device_info}</td>
+                      <td className="py-2.5">
+                        <Badge variant="outline" className={`text-[10px] ${
+                          lh.status === 'SUCCESS' ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10' :
+                          lh.status === 'FAILED_PIN' ? 'border-yellow-500/40 text-yellow-400 bg-yellow-500/10' :
+                          'border-[#ff2d55]/40 text-[#ff2d55] bg-[#ff2d55]/10'
+                        }`}>
+                          {lh.status}
+                        </Badge>
+                      </td>
+                      <td className="py-2.5 text-slate-400">{lh.location}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+
+          {/* Security Alerts Table */}
+          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-mono text-slate-200">Security Alerts</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {securityAlerts.map((alert) => (
+                <div key={alert.id} className="bg-slate-950/60 border border-slate-800 rounded p-3 font-mono text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-400">{alert.triggered_at}</span>
+                      <Badge className="bg-[#ff2d55]/20 text-[#ff2d55] border border-[#ff2d55]/30 text-[10px]">
+                        {alert.alert_type}
+                      </Badge>
+                      <span className="text-orange-400 font-bold">Severity: {alert.severity}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {!alert.acknowledged && (
+                        <Button 
+                          size="sm" 
+                          onClick={() => {
+                            setSecurityAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, acknowledged: true } : a));
+                            toast({ title: "Alert Acknowledged" });
+                          }}
+                          className="h-6 bg-slate-900 border-slate-700 text-[10px]"
+                        >
+                          Acknowledge
+                        </Button>
+                      )}
+                      <Button 
+                        size="sm" 
+                        variant="ghost"
+                        onClick={() => {
+                          setSecurityAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, expanded: !a.expanded } : a));
+                        }}
+                        className="h-6 text-[10px] text-[#00f0ff]"
+                      >
+                        {alert.expanded ? 'Hide Details' : 'Expand Details'}
+                      </Button>
+                    </div>
+                  </div>
+                  <div><span className="text-slate-400">Rationale:</span> {alert.rationale}</div>
+                  {alert.expanded && (
+                    <div className="p-2.5 bg-black/50 border border-slate-900 rounded space-y-1 text-[11px] text-cyan-300">
+                      <div><span className="text-slate-400">Triggered Threat Categories:</span> {alert.threat_categories.join(', ')}</div>
+                      <div><span className="text-slate-400">Sanitized Input Payload:</span> "{alert.sanitized_inputs[0]}"</div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  // 5. ACCOUNT DETAILS VIEW (FIX 5)
+  if (currentView === 'my_account') {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col p-6 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
+        <div className="max-w-5xl w-full mx-auto flex flex-col gap-6 font-mono">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div>
+              <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <User className="w-5 h-5 text-[#00f0ff]" /> MY ACCOUNT & SECURITY TELEMETRY
+              </h2>
+              <p className="text-xs text-slate-400">Comprehensive overview of profile identity, balances, whitelisted recipients, and security summary.</p>
+            </div>
+            <Button 
+              onClick={() => setCurrentView('dashboard')}
+              className="bg-slate-900 border border-slate-800 text-xs text-slate-200"
+            >
+              ← Back to Dashboard
+            </Button>
+          </div>
+
+          {/* SECTION 1 — IDENTITY & PROFILE */}
+          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+            <CardHeader className="pb-3"><CardTitle className="text-sm text-slate-200">1. Identity & Profile</CardTitle></CardHeader>
+            <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+              <div className="flex items-center gap-4">
+                {user?.avatar_url ? (
+                  <img src={user.avatar_url} alt={user.name} className="w-16 h-16 rounded-full border border-[#00f0ff]" />
+                ) : (
+                  <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center text-xl text-[#00f0ff] font-bold">
+                    {user?.full_name?.charAt(0) || 'U'}
+                  </div>
+                )}
+                <div>
+                  <div className="font-bold text-white text-sm">{user?.full_name || user?.name || 'Operator'}</div>
+                  <div className="text-xs text-[#00f0ff]">{user?.bankism_id || 'BKSM-94812'}</div>
+                  <Badge className="mt-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[9px]">VERIFIED</Badge>
+                </div>
+              </div>
+              <div className="text-xs space-y-1 text-slate-300">
+                <div><span className="text-slate-500">Account Tier:</span> Demo — Individual</div>
+                <div><span className="text-slate-500">Enrollment Date:</span> 2026-10-01</div>
+                <div><span className="text-slate-500">Recovery Email:</span> j***@gmail.com</div>
+              </div>
+              <div className="text-xs space-y-1 text-slate-300">
+                <div><span className="text-slate-500">Phone Number:</span> +91 ***** 12345</div>
+                <Button size="sm" variant="outline" className="mt-2 bg-slate-900 border-slate-800 text-xs">Edit Profile</Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* SECTION 2 — BALANCES & LIMITS */}
+          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+            <CardHeader className="pb-3"><CardTitle className="text-sm text-slate-200">2. Balances & Limits (USD)</CardTitle></CardHeader>
+            <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="bg-slate-950 p-3 rounded border border-slate-800 space-y-1">
+                <span className="text-xs text-slate-500 block uppercase">Current Balance</span>
+                <span className="text-xl font-bold text-emerald-400">$12,458.30</span>
+              </div>
+              <div className="bg-slate-950 p-3 rounded border border-slate-800 space-y-1">
+                <span className="text-xs text-slate-500 block uppercase">Available Balance</span>
+                <span className="text-xl font-bold text-white">$11,958.30</span>
+                <span className="text-[10px] text-slate-400 block">Pending Holds: $500.00</span>
+              </div>
+              <div className="bg-slate-950 p-3 rounded border border-slate-800 space-y-1">
+                <span className="text-xs text-slate-500 block uppercase">Daily Limit Usage ($25,000 max)</span>
+                <div className="text-sm text-slate-200 font-bold mt-1">$12,250.00 Remaining</div>
+                <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden border border-slate-800 mt-2">
+                  <div className="bg-[#00f0ff] h-full" style={{ width: '51%' }}></div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* SECTION 3 — AUTHORIZED RECIPIENTS (WHITELIST) */}
+          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between">
+              <CardTitle className="text-sm text-slate-200">3. Authorized Recipients (Whitelist)</CardTitle>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button size="sm" variant="outline" disabled className="bg-slate-900 border-slate-800 text-xs text-slate-500">Add Recipient</Button>
+                  </TooltipTrigger>
+                  <TooltipContent><p>Demo mode — whitelist is read-only</p></TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="pb-2">Name</th>
+                    <th className="pb-2">Account</th>
+                    <th className="pb-2">Status</th>
+                    <th className="pb-2">Last Transfer</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {[
+                    { name: 'John Doe', acc: 'ACC-123', status: 'Active', last: '$250.00 (2026-10-10)' },
+                    { name: 'Jane Smith', acc: 'ACC-456', status: 'Active', last: '$1,200.00 (2026-10-09)' },
+                    { name: 'Robert Johnson', acc: 'ACC-789', status: 'Active', last: '$75.50 (2026-10-08)' },
+                    { name: 'Alice Williams', acc: 'ACC-001', status: 'Active', last: '$500.00 (Pending)' },
+                    { name: 'Michael Brown', acc: 'ACC-002', status: 'Active', last: '$3,000.00 (Blocked)' },
+                  ].map((w, idx) => (
+                    <tr key={idx} className="hover:bg-slate-900/40">
+                      <td className="py-2.5 text-white">{w.name}</td>
+                      <td className="py-2.5 text-[#00f0ff]">{w.acc}</td>
+                      <td className="py-2.5"><span className="text-emerald-400">{w.status}</span></td>
+                      <td className="py-2.5 text-slate-400">{w.last}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+
+          {/* SECTION 4 — SECURITY & ACTIVITY SUMMARY */}
+          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between">
+              <CardTitle className="text-sm text-slate-200">4. Security & Activity Summary</CardTitle>
+              <Button 
+                onClick={() => setCurrentView('security_activity')}
+                size="sm" 
+                className="bg-[#00f0ff]/20 text-[#00f0ff] border border-[#00f0ff]/40 text-xs hover:bg-[#00f0ff]/30"
+              >
+                View Full Security Activity →
+              </Button>
+            </CardHeader>
+            <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+              <div className="space-y-1.5 text-xs text-slate-300">
+                <div><span className="text-slate-500">Last PIN Change:</span> 2026-10-11 10:30</div>
+                <div><span className="text-slate-500">Active Sessions:</span> 1</div>
+                <div><span className="text-slate-500">Warnings This Session:</span> <span className="text-yellow-400 font-bold">{warningCount}/3</span></div>
+                <div><span className="text-slate-500">Total Blocked Attempts:</span> {threatsBlockedCount}</div>
+              </div>
+              <div className="space-y-1.5 text-xs text-slate-300">
+                <div><span className="text-slate-500">Last Lockout:</span> Never</div>
+                <div><span className="text-slate-500">Login Attempts (7d):</span> 12 Success / 2 Failed / 1 Locked</div>
+              </div>
+              <div className="bg-slate-950 p-3 rounded border border-slate-800">
+                <span className="text-[10px] text-slate-500 block mb-2 uppercase">Login Attempts (Past 7 Days)</span>
+                <div className="h-16 flex items-end gap-1.5 justify-between">
+                  {[4, 6, 3, 5, 2, 7, 5].map((val, i) => (
+                    <div key={i} className="flex-1 bg-emerald-500/80 rounded-t hover:bg-emerald-400 transition-colors" style={{ height: `${val * 12}%` }} title={`Day ${i+1}: ${val} logins`}></div>
+                  ))}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
       <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-0" />
       
       <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
       <div className="absolute inset-0 pointer-events-none z-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[size:100%_4px] opacity-40"></div>
+
+      {/* FIX 3: FULL SCREEN LOCKOUT OVERLAY IF LOCKED OUT */}
+      {isLockedOut && (
+        <div className="fixed inset-0 z-50 bg-[#0a0e17]/95 backdrop-blur-2xl flex flex-col items-center justify-center p-6 text-center font-mono">
+          <div className="max-w-md w-full bg-[#0f1523] border border-[#ff2d55]/60 rounded-2xl p-8 shadow-[0_0_80px_rgba(255,45,85,0.4)] space-y-6">
+            <div className="w-16 h-16 rounded-full bg-[#ff2d55]/20 border border-[#ff2d55] flex items-center justify-center text-[#ff2d55] mx-auto animate-pulse">
+              <Lock className="w-8 h-8" />
+            </div>
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold text-[#ff2d55] tracking-widest">🔒 SESSION LOCKED</h2>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Too many suspicious attempts detected. Session will unlock in automatically.
+              </p>
+            </div>
+            <div className="text-4xl font-bold text-white tracking-widest bg-slate-950 p-4 rounded-xl border border-slate-800">
+              {String(Math.floor(lockCountdownSeconds / 60)).padStart(2, '0')}:{String(lockCountdownSeconds % 60).padStart(2, '0')}
+            </div>
+            <p className="text-[10px] text-slate-500">
+              For security compliance, automated request buffer is disabled during lockout.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* DEMO BANNER */}
       <div className="relative z-30 bg-[#ff2d55]/10 border-b border-[#ff2d55]/30 px-4 py-2 text-center text-xs font-mono text-[#ff2d55] tracking-widest uppercase flex items-center justify-center gap-2">
@@ -1017,7 +1493,7 @@ export default function Index() {
         <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
       </div>
 
-      {/* SHARED HEADER (PART 2 - SECTION E) */}
+      {/* SHARED HEADER (FIX 3 WARNINGS BADGE & FIX 5 NAVIGATION) */}
       <header className="relative z-30 border-b border-slate-800 bg-[#0a0e17]/80 backdrop-blur-md px-6 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
@@ -1032,76 +1508,92 @@ export default function Index() {
             </div>
           </div>
 
-          <nav className="flex items-center gap-2">
+          <nav className="flex items-center gap-2 font-mono text-xs">
             <button
               onClick={() => setCurrentView('dashboard')}
-              className={`px-4 py-2 text-xs font-mono transition-all flex items-center gap-2 relative ${
+              className={`px-3 py-1.5 transition-all flex items-center gap-1.5 relative ${
                 currentView === 'dashboard' ? 'text-[#00f0ff]' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              Dashboard
-              {currentView === 'dashboard' && (
-                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#00f0ff] shadow-[0_0_10px_#00f0ff]"></div>
-              )}
+              <LayoutDashboard className="w-3.5 h-3.5" /> Dashboard
             </button>
-
             <button
               onClick={() => setCurrentView('analyzer')}
-              className={`px-4 py-2 text-xs font-mono transition-all flex items-center gap-2 relative ${
+              className={`px-3 py-1.5 transition-all flex items-center gap-1.5 relative ${
                 currentView === 'analyzer' ? 'text-[#00f0ff]' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Terminal className="w-3.5 h-3.5" />
-              Analyzer
-              {currentView === 'analyzer' && (
-                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#00f0ff] shadow-[0_0_10px_#00f0ff]"></div>
+              <Terminal className="w-3.5 h-3.5" /> Analyzer
+            </button>
+            <button
+              onClick={() => setCurrentView('my_account')}
+              className={`px-3 py-1.5 transition-all flex items-center gap-1.5 relative ${
+                currentView === 'my_account' ? 'text-[#00f0ff]' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <User className="w-3.5 h-3.5" /> My Account
+            </button>
+            <button
+              onClick={() => setCurrentView('security_activity')}
+              className={`px-3 py-1.5 transition-all flex items-center gap-1.5 relative ${
+                currentView === 'security_activity' ? 'text-[#00f0ff]' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <ShieldAlert className="w-3.5 h-3.5" /> Security Activity
+              {unacknowledgedAlertsCount > 0 && (
+                <span className="w-2 h-2 rounded-full bg-[#ff2d55] animate-pulse"></span>
               )}
             </button>
           </nav>
         </div>
 
-        {/* RIGHT HEADER ACTIONS */}
-        <div className="flex items-center gap-4">
-          <div className={`hidden md:flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono ${
-            sessionRiskScore > 1.5 
-              ? 'bg-red-950/40 border-[#ff2d55]/60 text-[#ff2d55] animate-pulse' 
-              : 'bg-slate-900/80 border-slate-800 text-slate-300'
+        {/* RIGHT HEADER ACTIONS (WARNINGS: X/3 BADGE) */}
+        <div className="flex items-center gap-3 font-mono text-xs">
+          
+          {/* WARNINGS BADGE (FIX 3) */}
+          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border ${
+            warningCount === 0 ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-400' :
+            warningCount === 1 ? 'bg-yellow-950/40 border-yellow-500/40 text-yellow-400' :
+            warningCount === 2 ? 'bg-orange-950/40 border-orange-500/40 text-orange-400' :
+            'bg-red-950/40 border-[#ff2d55]/60 text-[#ff2d55] animate-pulse'
+          }`}>
+            <AlertTriangle className="w-3.5 h-3.5" />
+            <span>WARNINGS: {warningCount}/3</span>
+          </div>
+
+          <div className={`hidden md:flex items-center gap-2 px-3 py-1 rounded border ${
+            sessionRiskScore > 1.5 ? 'bg-red-950/40 border-[#ff2d55]/60 text-[#ff2d55]' : 'bg-slate-900/80 border-slate-800 text-slate-300'
           }`}>
             <Flame className="w-3.5 h-3.5" />
-            <span>Session Risk: {sessionRiskScore.toFixed(1)}</span>
+            <span>Risk: {sessionRiskScore.toFixed(1)}</span>
             <button onClick={handleResetSession} className="ml-1 text-[10px] underline text-slate-400 hover:text-white">Reset</button>
           </div>
 
-          <div className="flex items-center gap-3 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full font-mono text-xs">
-            {user?.avatar_url && <img src={user.avatar_url} alt={user.name} className="w-6 h-6 rounded-full border border-[#00f0ff]" />}
-            <span className="text-slate-200 hidden sm:inline">Welcome back, {user?.full_name?.split(' ')[0] || user?.name || 'Operator'}</span>
+          <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-700/80 px-3 py-1.5 rounded-full">
+            {user?.avatar_url && <img src={user.avatar_url} alt={user.name} className="w-5 h-5 rounded-full border border-[#00f0ff]" />}
+            <span className="text-slate-200 hidden sm:inline">{user?.full_name?.split(' ')[0] || user?.name || 'Operator'}</span>
             
             <Button 
               variant="ghost" 
               size="sm" 
               onClick={handleLockSession} 
-              className="h-7 text-xs text-yellow-400 hover:text-yellow-300 hover:bg-slate-800 gap-1 px-2"
-              title="Lock Session"
+              className="h-6 text-[11px] text-yellow-400 hover:text-yellow-300 hover:bg-slate-800 px-1.5"
             >
-              <Lock className="w-3.5 h-3.5" />
-              Lock
+              <Lock className="w-3 h-3" />
             </Button>
-
             <Button 
               variant="ghost" 
               size="icon" 
               onClick={handleSignOut} 
               className="w-6 h-6 text-slate-400 hover:text-[#ff2d55] hover:bg-slate-800"
-              title="Sign out"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut className="w-3 h-3" />
             </Button>
           </div>
         </div>
       </header>
 
-      {/* ================= DASHBOARD VIEW (PART 2 ENHANCED) ================= */}
+      {/* ================= DASHBOARD VIEW (RECONFIRMED SECTIONS) ================= */}
       {currentView === 'dashboard' && (
         <main className="relative z-30 flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 flex flex-col gap-6">
           
@@ -1112,7 +1604,7 @@ export default function Index() {
             </div>
             <Button
               onClick={() => setCurrentView('analyzer')}
-              className="bg-gradient-to-r from-[#00f0ff] to-[#0072ff] hover:from-[#00d8e6] hover:to-[#0062db] text-slate-950 font-mono font-bold text-xs gap-2 shadow-[0_0_15px_rgba(0,240,255,0.3)]"
+              className="bg-gradient-to-r from-[#00f0ff] to-[#0072ff] hover:from-[#00d8e6] text-slate-950 font-mono font-bold text-xs gap-2 shadow-[0_0_15px_rgba(0,240,255,0.3)]"
             >
               <Play className="w-3.5 h-3.5 fill-slate-950" />
               New Analysis
@@ -1121,7 +1613,7 @@ export default function Index() {
 
           {/* TOP ROW — 4 STAT CARDS */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#00f0ff]"></div>
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
@@ -1134,7 +1626,7 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#ff2d55]"></div>
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
@@ -1147,7 +1639,7 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-emerald-400"></div>
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
@@ -1160,7 +1652,7 @@ export default function Index() {
               </CardContent>
             </Card>
 
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-yellow-400"></div>
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
@@ -1174,14 +1666,11 @@ export default function Index() {
             </Card>
           </div>
 
-          {/* NEW DASHBOARD SECTIONS (PART 2: IDENTITY, ACCOUNT SUMMARY, RECENT TRANSFERS) */}
+          {/* DASHBOARD SECTIONS (IDENTITY, ACCOUNT SUMMARY, RECENT TRANSFERS) */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
-            {/* SECTION A & B: USER IDENTITY CARD & ACCOUNT SUMMARY CARD */}
             <div className="lg:col-span-1 flex flex-col gap-6">
-              
-              {/* SECTION A: USER IDENTITY CARD */}
-              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
                 <CardHeader className="pb-3 flex flex-row items-center justify-between">
                   <CardTitle className="text-xs font-mono tracking-wider text-slate-300 flex items-center gap-2">
                     <User className="w-4 h-4 text-[#00f0ff]" /> USER IDENTITY
@@ -1206,8 +1695,7 @@ export default function Index() {
                 </CardContent>
               </Card>
 
-              {/* SECTION B: ACCOUNT SUMMARY CARD */}
-              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
                 <CardHeader className="pb-3">
                   <CardTitle className="text-xs font-mono tracking-wider text-slate-300 flex items-center gap-2">
                     <DollarSign className="w-4 h-4 text-emerald-400" /> ACCOUNT SUMMARY (USD)
@@ -1216,7 +1704,7 @@ export default function Index() {
                 <CardContent className="font-mono space-y-3 pt-0">
                   <div className="flex items-center justify-between bg-slate-950/60 p-2.5 rounded border border-slate-800">
                     <span className="text-xs text-slate-400">Current Balance:</span>
-                    <span className="text-emerald-400 font-bold text-sm shadow-[0_0_10px_rgba(52,211,153,0.2)]">$12,458.30</span>
+                    <span className="text-emerald-400 font-bold text-sm">$12,458.30</span>
                   </div>
                   <div className="flex items-center justify-between bg-slate-950/60 p-2.5 rounded border border-slate-800">
                     <span className="text-xs text-slate-400">Available Balance:</span>
@@ -1228,16 +1716,13 @@ export default function Index() {
                   </div>
                 </CardContent>
               </Card>
-
             </div>
 
-            {/* SECTION C: RECENT TRANSFERS PANEL */}
             <div className="lg:col-span-2">
-              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] h-full">
+              <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 h-full">
                 <CardHeader className="pb-3 flex flex-row items-center justify-between">
                   <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-[#00f0ff]" />
-                    RECENT TRANSFERS
+                    <Clock className="w-4 h-4 text-[#00f0ff]" /> RECENT TRANSFERS
                   </CardTitle>
                   <span className="text-[10px] font-mono text-slate-400">Last 5 Transactions</span>
                 </CardHeader>
@@ -1258,9 +1743,7 @@ export default function Index() {
                           <tr 
                             key={tx.id || idx}
                             onClick={() => {
-                              if (tx.status === 'BLOCKED') {
-                                setSelectedBlockedTransfer(tx);
-                              }
+                              if (tx.status === 'BLOCKED') setSelectedBlockedTransfer(tx);
                             }}
                             className={`transition-colors ${tx.status === 'BLOCKED' ? 'cursor-pointer hover:bg-red-950/20' : 'hover:bg-slate-900/60'}`}
                           >
@@ -1274,8 +1757,9 @@ export default function Index() {
                               <Badge variant="outline" className={`text-[10px] ${
                                 tx.status === 'COMPLETED' ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10' :
                                 tx.status === 'PENDING' ? 'border-yellow-500/40 text-yellow-400 bg-yellow-500/10' :
+                                tx.status === 'PENDING_EXECUTION' ? 'border-cyan-500/40 text-cyan-400 bg-cyan-500/10' :
                                 'border-[#ff2d55]/40 text-[#ff2d55] bg-[#ff2d55]/10 cursor-pointer hover:underline'
-                              }`} title={tx.status === 'BLOCKED' ? 'Click to view block rationale' : ''}>
+                              }`}>
                                 {tx.status}
                               </Badge>
                             </td>
@@ -1300,48 +1784,34 @@ export default function Index() {
 
           </div>
 
-          {/* MIDDLE ROW — 2 PANELS */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-[#00f0ff]" />
-                  THREAT BREAKDOWN
+                  <BarChart3 className="w-4 h-4 text-[#00f0ff]" /> THREAT BREAKDOWN
                 </CardTitle>
-                <CardDescription className="text-xs text-slate-400">Count of intercepted requests per threat category.</CardDescription>
               </CardHeader>
               <CardContent className="h-[240px] pt-4">
-                {totalRequestsCount === 0 ? (
-                  <div className="h-full flex items-center justify-center text-xs font-mono text-slate-500 italic">
-                    No analyses yet. Run an analysis in the Analyzer view.
-                  </div>
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={threatChartData} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
-                      <XAxis type="number" stroke="#64748b" fontSize={10} tickLine={false} />
-                      <YAxis dataKey="category" type="category" stroke="#94a3b8" fontSize={11} width={130} tickLine={false} />
-                      <RechartsTooltip 
-                        contentStyle={{ backgroundColor: '#070a12', borderColor: '#1e293b', borderRadius: '8px', fontSize: '12px', fontFamily: 'monospace' }}
-                      />
-                      <Bar dataKey="count" fill="#00f0ff" radius={[0, 4, 4, 0]}>
-                        {threatChartData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#ff2d55' : '#1e293b'} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                )}
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={threatChartData} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
+                    <XAxis type="number" stroke="#64748b" fontSize={10} tickLine={false} />
+                    <YAxis dataKey="category" type="category" stroke="#94a3b8" fontSize={11} width={130} tickLine={false} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#070a12', borderColor: '#1e293b', borderRadius: '8px', fontSize: '12px', fontFamily: 'monospace' }} />
+                    <Bar dataKey="count" fill="#00f0ff" radius={[0, 4, 4, 0]}>
+                      {threatChartData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#ff2d55' : '#1e293b'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
               </CardContent>
             </Card>
 
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-[#00f0ff]" />
-                  KILL-CHAIN STAGE HITS
+                  <Cpu className="w-4 h-4 text-[#00f0ff]" /> KILL-CHAIN STAGE HITS
                 </CardTitle>
-                <CardDescription className="text-xs text-slate-400">Identifies WHERE adversarial requests are being caught.</CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-3 pt-2">
                 {[
@@ -1353,138 +1823,57 @@ export default function Index() {
                 ].map((stage, idx) => {
                   const pct = Math.round((stage.hits / maxStageHit) * 100);
                   return (
-                    <div key={idx} className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between text-xs font-mono">
+                    <div key={idx} className="flex flex-col gap-1 font-mono">
+                      <div className="flex items-center justify-between text-xs">
                         <span className="text-slate-300">{stage.name}</span>
                         <span className="text-[#00f0ff] font-bold">{stage.hits} hits</span>
                       </div>
                       <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden border border-slate-800">
-                        <div 
-                          className="bg-gradient-to-r from-[#00f0ff] to-[#ff2d55] h-full transition-all duration-500 rounded-full"
-                          style={{ width: `${Math.max(pct, 4)}%` }}
-                        ></div>
+                        <div className="bg-gradient-to-r from-[#00f0ff] to-[#ff2d55] h-full rounded-full" style={{ width: `${Math.max(pct, 4)}%` }}></div>
                       </div>
                     </div>
                   );
                 })}
               </CardContent>
             </Card>
-
           </div>
-
-          {/* BOTTOM ROW — RECENT ACTIVITY TABLE */}
-          <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-[#00f0ff]" />
-                RECENT ACTIVITY LOG ({history.length})
-              </CardTitle>
-              <CardDescription className="text-xs text-slate-400">Click any row to load the request into the Analyzer view.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {history.length === 0 ? (
-                <div className="text-center py-12 text-xs font-mono text-slate-500">
-                  No analyses yet. Head to the Analyzer to run your first request.
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left font-mono text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-800 text-slate-400">
-                        <th className="pb-2.5 font-medium">Timestamp</th>
-                        <th className="pb-2.5 font-medium">Input Payload</th>
-                        <th className="pb-2.5 font-medium">Verdict</th>
-                        <th className="pb-2.5 font-medium">Risk Level</th>
-                        <th className="pb-2.5 font-medium">Threat Category</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/60">
-                      {history.slice(0, 10).map((item, idx) => (
-                        <tr 
-                          key={idx}
-                          onClick={() => {
-                            setInputText(item.input_text || '');
-                            setVerdict(item);
-                            setCurrentView('analyzer');
-                          }}
-                          className="hover:bg-slate-900/60 cursor-pointer transition-colors group"
-                        >
-                          <td className="py-3 text-slate-400">{item.timestamp}</td>
-                          <td className="py-3 text-slate-200 truncate max-w-xs group-hover:text-[#00f0ff] transition-colors">
-                            "{item.input_text}"
-                          </td>
-                          <td className="py-3">
-                            <Badge variant="outline" className={`text-[10px] ${
-                              item.approved ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10' : 'border-[#ff2d55]/40 text-[#ff2d55] bg-[#ff2d55]/10'
-                            }`}>
-                              {item.approved ? 'APPROVED' : 'BLOCKED'}
-                            </Badge>
-                          </td>
-                          <td className="py-3 uppercase">
-                            <span className={`px-2 py-0.5 rounded text-[10px] ${
-                              item.risk_level === 'low' ? 'bg-emerald-500/10 text-emerald-400' :
-                              item.risk_level === 'medium' ? 'bg-yellow-500/10 text-yellow-400' :
-                              item.risk_level === 'high' ? 'bg-orange-500/10 text-orange-400' :
-                              'bg-[#ff2d55]/10 text-[#ff2d55]'
-                            }`}>
-                              {item.risk_level}
-                            </span>
-                          </td>
-                          <td className="py-3 text-slate-400">{item.threat_category || 'None'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
         </main>
       )}
 
-      {/* ================= ANALYZER VIEW (WITH SECTION D - SUGGESTED TRANSFERS) ================= */}
+      {/* ================= ANALYZER VIEW ================= */}
       {currentView === 'analyzer' && (
         <main className="relative z-30 flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           
-          {/* LEFT COLUMN: INPUT PANEL (5 cols) */}
           <div className="lg:col-span-5 flex flex-col gap-6">
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden group">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden group">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-[#00f0ff] to-[#ff2d55]"></div>
               
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between mb-1">
-                  <button 
-                    onClick={() => setCurrentView('dashboard')}
-                    className="text-xs font-mono text-[#00f0ff] hover:underline flex items-center gap-1"
-                  >
+                  <button onClick={() => setCurrentView('dashboard')} className="text-xs font-mono text-[#00f0ff] hover:underline flex items-center gap-1">
                     ← Back to Dashboard
                   </button>
                   <span className="text-[10px] text-slate-500 font-mono">STRICT VALIDATION</span>
                 </div>
                 <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-[#00f0ff]" />
-                  UNTRUSTED REQUEST BUFFER
+                  <Terminal className="w-4 h-4 text-[#00f0ff]" /> UNTRUSTED REQUEST BUFFER
                 </CardTitle>
-                <CardDescription className="text-xs text-slate-400">
-                  Input banking requests. Whitelist rules: ACC-123 (John), ACC-456 (Jane), ACC-789 (Robert).
-                </CardDescription>
               </CardHeader>
 
               <CardContent className="flex flex-col gap-4">
                 <div className="relative">
                   <Textarea 
-                    placeholder="Enter banking request (e.g. Transfer $50 to John Doe at ACC-123)..."
+                    placeholder="Enter banking request..."
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
-                    className="min-h-[160px] bg-[#070a12] border-slate-800 text-slate-200 font-mono text-sm resize-none focus-visible:ring-1 focus-visible:ring-[#00f0ff] focus-visible:border-[#00f0ff] transition-all placeholder:text-slate-600 p-4 leading-relaxed"
+                    className="min-h-[160px] bg-[#070a12] border-slate-800 text-slate-200 font-mono text-sm resize-none focus-visible:ring-1 focus-visible:ring-[#00f0ff] p-4 leading-relaxed"
                   />
                   <div className="absolute bottom-3 right-3 text-[10px] font-mono text-slate-500 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
                     {inputText.length} / 2000
                   </div>
                 </div>
 
-                {/* PRESET BUTTONS */}
                 <div className="flex flex-col gap-2">
                   <label className="text-[11px] font-mono text-slate-400 tracking-wider uppercase flex items-center gap-1.5">
                     <Zap className="w-3 h-3 text-[#00f0ff]" /> Test Cases & Security Presets:
@@ -1494,73 +1883,43 @@ export default function Index() {
                       <button
                         key={idx}
                         onClick={() => setInputText(preset.text)}
-                        className="text-left p-2.5 rounded-md bg-slate-900/60 border border-slate-800 hover:border-[#00f0ff]/50 hover:bg-slate-900 transition-all group/btn flex flex-col gap-1"
+                        className="text-left p-2.5 rounded-md bg-slate-900/60 border border-slate-800 hover:border-[#00f0ff]/50 hover:bg-slate-900 transition-all flex flex-col gap-1"
                       >
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-mono font-medium text-slate-200 group-hover/btn:text-[#00f0ff] transition-colors">
-                            {preset.name}
-                          </span>
-                          <ArrowRight className="w-3 h-3 text-slate-600 group-hover/btn:text-[#00f0ff] transition-colors" />
+                          <span className="text-xs font-mono font-medium text-slate-200">{preset.name}</span>
+                          <ArrowRight className="w-3 h-3 text-slate-600" />
                         </div>
-                        <span className="text-[11px] text-slate-400 line-clamp-1 font-mono">
-                          "{preset.text}"
-                        </span>
+                        <span className="text-[11px] text-slate-400 line-clamp-1 font-mono">"{preset.text}"</span>
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {/* ANALYZE BUTTON */}
                 <Button
                   onClick={() => runPipeline(inputText)}
                   disabled={isAnalyzing}
-                  className="w-full mt-2 h-12 bg-gradient-to-r from-[#00f0ff] to-[#0072ff] hover:from-[#00d8e6] hover:to-[#0062db] text-slate-950 font-mono font-bold tracking-wider uppercase text-sm shadow-[0_0_25px_rgba(0,240,255,0.3)] transition-all duration-300 relative overflow-hidden group/analyze"
+                  className="w-full mt-2 h-12 bg-gradient-to-r from-[#00f0ff] to-[#0072ff] text-slate-950 font-mono font-bold tracking-wider uppercase text-sm shadow-[0_0_25px_rgba(0,240,255,0.3)]"
                 >
-                  <div className="absolute inset-0 bg-white/20 translate-y-full group-hover/analyze:translate-y-0 transition-transform duration-300"></div>
-                  <div className="relative flex items-center justify-center gap-2">
-                    {isAnalyzing ? (
-                      <>
-                        <RefreshCw className="w-5 h-5 animate-spin text-slate-950" />
-                        <span>RUNNING 6-STAGE PIPELINE...</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldAlert className="w-5 h-5 text-slate-950" />
-                        <span>ANALYZE REQUEST THROUGH FIREWALL</span>
-                      </>
-                    )}
-                  </div>
+                  {isAnalyzing ? <RefreshCw className="w-5 h-5 animate-spin" /> : <ShieldAlert className="w-5 h-5" />}
+                  <span>ANALYZE REQUEST THROUGH FIREWALL</span>
                 </Button>
               </CardContent>
             </Card>
           </div>
 
-          {/* RIGHT COLUMN: RESULTS PANEL, PIPELINE & SECTION D (7 cols) */}
           <div className="lg:col-span-7 flex flex-col gap-6">
-            
-            {/* VERDICT & JSON DISPLAY CARD */}
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)] relative overflow-hidden">
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden">
               <div className={`absolute top-0 left-0 right-0 h-[3px] transition-colors duration-500 ${
-                !verdict ? 'bg-slate-700' : verdict.approved ? 'bg-emerald-400 shadow-[0_0_15px_#34d399]' : 'bg-[#ff2d55] shadow-[0_0_15px_#ff2d55]'
+                !verdict ? 'bg-slate-700' : verdict.approved ? 'bg-emerald-400' : 'bg-[#ff2d55]'
               }`}></div>
 
               <CardHeader className="pb-3 flex flex-row items-center justify-between">
-                <div>
-                  <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                    <Cpu className="w-4 h-4 text-[#00f0ff]" />
-                    FIREWALL VERDICT & ENTITY EXTRACTION
-                  </CardTitle>
-                </div>
-
+                <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-[#00f0ff]" /> FIREWALL VERDICT & CATEGORY
+                </CardTitle>
                 {verdict && (
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={copyJsonToClipboard}
-                    className="h-8 bg-slate-900 border-slate-800 hover:border-[#00f0ff] font-mono text-xs gap-1.5 text-slate-300"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    COPY JSON
+                  <Button variant="outline" size="sm" onClick={copyJsonToClipboard} className="h-8 bg-slate-900 border-slate-800 font-mono text-xs gap-1.5 text-slate-300">
+                    <Copy className="w-3.5 h-3.5" /> COPY JSON
                   </Button>
                 )}
               </CardHeader>
@@ -1568,241 +1927,83 @@ export default function Index() {
               <CardContent className="flex flex-col gap-5">
                 {!verdict && !isAnalyzing && (
                   <div className="py-16 flex flex-col items-center justify-center text-center gap-3 border border-dashed border-slate-800 rounded-lg bg-slate-950/40">
-                    <div className="w-12 h-12 rounded-full bg-slate-900 flex items-center justify-center border border-slate-800 text-slate-600 animate-pulse">
-                      <Shield className="w-6 h-6 text-slate-500" />
-                    </div>
-                    <div className="space-y-1">
-                      <h3 className="text-sm font-mono text-slate-300">Awaiting input...</h3>
-                      <p className="text-xs text-slate-500 max-w-sm">
-                        Submit a banking request or select a test case preset to evaluate through the hardened firewall.
-                      </p>
-                    </div>
+                    <Shield className="w-6 h-6 text-slate-500 animate-pulse" />
+                    <p className="text-xs text-slate-400 font-mono">Submit a request or select a preset to analyze.</p>
                   </div>
                 )}
 
                 {isAnalyzing && (
                   <div className="py-16 flex flex-col items-center justify-center text-center gap-4 border border-slate-800 rounded-lg bg-slate-950/40">
-                    <div className="relative w-16 h-16 flex items-center justify-center">
-                      <div className="absolute inset-0 rounded-full border-2 border-[#00f0ff]/20 border-t-[#00f0ff] animate-spin"></div>
-                      <ShieldAlert className="w-7 h-7 text-[#00f0ff] animate-pulse" />
-                    </div>
-                    <div className="space-y-1">
-                      <h3 className="text-sm font-mono text-[#00f0ff] animate-pulse">ANALYZING ACCOUNTS & CONTEXT...</h3>
-                      <p className="text-xs text-slate-400 font-mono">
-                        Stage {currentStageIndex + 1} of 5 executing...
-                      </p>
-                    </div>
+                    <RefreshCw className="w-7 h-7 text-[#00f0ff] animate-spin" />
+                    <p className="text-xs text-slate-300 font-mono">Analyzing semantic category & threat vectors...</p>
                   </div>
                 )}
 
                 {verdict && !isAnalyzing && (
-                  <div className="flex flex-col gap-5 animate-in fade-in slide-in-from-bottom-3 duration-500">
-                    
-                    {/* VERDICT BANNER */}
-                    <div className={`p-4 rounded-lg border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
-                      verdict.approved 
-                        ? 'bg-emerald-950/30 border-emerald-500/40 shadow-[0_0_20px_rgba(52,211,153,0.1)]' 
-                        : 'bg-red-950/30 border-[#ff2d55]/40 shadow-[0_0_20px_rgba(255,45,85,0.1)] animate-shake'
+                  <div className="flex flex-col gap-5 animate-in fade-in duration-300 font-mono">
+                    <div className={`p-4 rounded-lg border flex items-center justify-between gap-4 ${
+                      verdict.approved ? 'bg-emerald-950/30 border-emerald-500/40' : 'bg-red-950/30 border-[#ff2d55]/40 animate-shake'
                     }`}>
                       <div className="flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${
-                          verdict.approved ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400' : 'bg-[#ff2d55]/20 border-[#ff2d55] text-[#ff2d55]'
-                        }`}>
-                          {verdict.approved ? <CheckCircle2 className="w-6 h-6" /> : <XCircle className="w-6 h-6" />}
-                        </div>
+                        {verdict.approved ? <CheckCircle2 className="w-6 h-6 text-emerald-400" /> : <XCircle className="w-6 h-6 text-[#ff2d55]" />}
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-mono text-slate-400 uppercase">Verdict:</span>
-                            <span className={`text-sm font-mono font-bold tracking-widest px-2 py-0.5 rounded ${
-                              verdict.approved ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-[#ff2d55]/20 text-[#ff2d55] border border-[#ff2d55]/30'
-                            }`}>
-                              {verdict.approved ? 'APPROVED' : 'BLOCKED'}
-                            </span>
-                            {verdict.requires_confirmation && (
-                              <span className="text-[10px] font-mono bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 px-2 py-0.5 rounded">
-                                CONFIRMATION REQUIRED
-                              </span>
-                            )}
+                            <span className="text-xs text-slate-400">Category:</span>
+                            <Badge className="bg-[#00f0ff]/10 text-[#00f0ff] border border-[#00f0ff]/30 text-[10px]">
+                              {verdict.category}
+                            </Badge>
                           </div>
-                          <p className="text-xs font-mono text-slate-300 mt-1">
-                            {verdict.threat_category ? `Threat: ${verdict.threat_category}` : 'All safety & identity checks passed.'}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <div className="text-right">
-                          <span className="text-[10px] font-mono text-slate-400 block uppercase">Risk Level</span>
-                          <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded border uppercase ${
-                            verdict.risk_level === 'low' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
-                            verdict.risk_level === 'medium' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' :
-                            verdict.risk_level === 'high' ? 'bg-orange-500/10 text-orange-400 border-orange-500/30' :
-                            'bg-[#ff2d55]/10 text-[#ff2d55] border-[#ff2d55]/30'
-                          }`}>
-                            {verdict.risk_level}
-                          </span>
+                          <p className="text-xs text-slate-300 mt-1">{verdict.rationale}</p>
                         </div>
                       </div>
                     </div>
 
-                    {/* EXTRACTED ENTITIES GRID */}
-                    <div className="grid grid-cols-3 gap-3">
-                      <div className="bg-slate-950/60 border border-slate-800 p-2.5 rounded text-center">
-                        <span className="text-[10px] font-mono text-slate-500 block uppercase">Account</span>
-                        <span className="text-xs font-mono text-[#00f0ff] font-bold">{verdict.extracted_account || 'None'}</span>
-                      </div>
-                      <div className="bg-slate-950/60 border border-slate-800 p-2.5 rounded text-center">
-                        <span className="text-[10px] font-mono text-slate-500 block uppercase">Recipient</span>
-                        <span className="text-xs font-mono text-slate-200 font-bold truncate block">{verdict.extracted_recipient_name || 'None'}</span>
-                      </div>
-                      <div className="bg-slate-950/60 border border-slate-800 p-2.5 rounded text-center">
-                        <span className="text-[10px] font-mono text-slate-500 block uppercase">Amount</span>
-                        <span className="text-xs font-mono text-emerald-400 font-bold">{verdict.extracted_amount ? `$${verdict.extracted_amount.toLocaleString()}` : 'None'}</span>
-                      </div>
-                    </div>
-
-                    {/* RATIONALE */}
-                    <div className="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3.5 flex flex-col gap-1.5">
-                      <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wide flex items-center gap-1.5">
-                        <Shield className="w-3.5 h-3.5 text-[#00f0ff]" /> Rationale & Analysis
-                      </span>
-                      <p className="text-xs text-slate-300 font-mono leading-relaxed">
-                        {verdict.rationale}
-                      </p>
-                    </div>
-
-                    {/* JSON PREVIEW */}
                     <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-[11px] font-mono text-slate-400 uppercase">Final JSON Verdict Schema</span>
-                        <span className="text-[10px] font-mono text-slate-500">Secure Spec</span>
-                      </div>
-                      <pre className="text-[11px] font-mono text-cyan-300 bg-[#060911] p-3 rounded border border-slate-900 overflow-x-auto max-h-[140px]">
-                        {JSON.stringify({
-                          approved: verdict.approved,
-                          risk_level: verdict.risk_level,
-                          threat_category: verdict.threat_category,
-                          confidence: verdict.confidence,
-                          sanitized_input: verdict.sanitized_input,
-                          rationale: verdict.rationale,
-                          requires_confirmation: verdict.requires_confirmation,
-                          confirmation_token: verdict.confirmation_token,
-                          session_risk_score: verdict.session_risk_score,
-                          extracted_account: verdict.extracted_account,
-                          extracted_recipient_name: verdict.extracted_recipient_name,
-                          extracted_amount: verdict.extracted_amount,
-                          blocking_stage: verdict.blocking_stage
-                        }, null, 2)}
+                      <pre className="text-[11px] text-cyan-300 bg-[#060911] p-3 rounded border border-slate-900 overflow-x-auto max-h-[160px]">
+                        {JSON.stringify(verdict, null, 2)}
                       </pre>
                     </div>
-
                   </div>
                 )}
               </CardContent>
             </Card>
 
-            {/* 5-STAGE PIPELINE VISUALIZATION */}
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-[#00f0ff]" />
-                  HARDENED FIREWALL PIPELINE
-                </CardTitle>
-              </CardHeader>
-
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+              <CardHeader className="pb-3"><CardTitle className="text-sm font-mono text-slate-200">5-Stage Firewall Pipeline</CardTitle></CardHeader>
               <CardContent>
-                <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
-                  {[
-                    { id: 1, title: "Sanitize & Char", desc: "Zero-width & emoji removal" },
-                    { id: 2, title: "Context Integrity", desc: "Indirect injection scan" },
-                    { id: 3, title: "Pattern Scan", desc: "Regex signature detection" },
-                    { id: 4, title: "Tool Guard", desc: "Recipient identity & whitelist" },
-                    { id: 5, title: "Risk & Session", desc: "Session score & confirmation" },
-                  ].map((stage, idx) => {
-                    const stageResult = verdict?.stages[idx];
-                    const isCompleted = verdict !== null && !isAnalyzing;
-                    const isCurrent = isAnalyzing && currentStageIndex === idx;
-
-                    return (
-                      <div 
-                        key={stage.id} 
-                        className={`p-3 rounded-lg border flex flex-col justify-between gap-2 transition-all duration-300 ${
-                          isCurrent 
-                            ? 'bg-[#00f0ff]/10 border-[#00f0ff] shadow-[0_0_15px_rgba(0,240,255,0.2)]' 
-                            : isCompleted && stageResult?.passed
-                            ? 'bg-emerald-950/20 border-emerald-500/40'
-                            : isCompleted && !stageResult?.passed
-                            ? 'bg-red-950/20 border-[#ff2d55]/40'
-                            : 'bg-slate-950/40 border-slate-800'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-mono font-bold text-slate-300">0{stage.id}</span>
-                          {isCurrent ? (
-                            <RefreshCw className="w-3.5 h-3.5 text-[#00f0ff] animate-spin" />
-                          ) : isCompleted && stageResult ? (
-                            stageResult.passed ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <XCircle className="w-4 h-4 text-[#ff2d55]" />
-                          ) : (
-                            <Clock className="w-3.5 h-3.5 text-slate-600" />
-                          )}
-                        </div>
-                        <div>
-                          <h4 className="text-xs font-mono font-bold text-slate-200">{stage.title}</h4>
-                          <p className="text-[10px] text-slate-400 font-mono mt-1 leading-tight">{stage.desc}</p>
-                        </div>
-                        {stageResult && (
-                          <div className="pt-2 border-t border-slate-800/60 mt-1">
-                            <span className="text-[9px] font-mono text-[#00f0ff] block truncate">
-                              {stageResult.details}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 font-mono">
+                  {['Sanitize', 'Pattern Scan', 'Semantic Analysis', 'Tool Guard', 'Verdict'].map((name, idx) => (
+                    <div key={idx} className="p-2.5 rounded bg-slate-950 border border-slate-800 text-xs">
+                      <div className="text-[#00f0ff] font-bold">0{idx+1}</div>
+                      <div className="text-slate-200 mt-1">{name}</div>
+                    </div>
+                  ))}
                 </div>
               </CardContent>
             </Card>
 
-            {/* PART 2 — SECTION D: SUGGESTED TRANSFERS PANEL */}
-            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 shadow-[0_8px_30px_rgb(0,0,0,0.3)]">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-mono tracking-wide text-slate-200 flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-[#00f0ff]" />
-                  SUGGESTED TRANSFERS
-                </CardTitle>
-                <CardDescription className="text-xs text-slate-400">One-click prefill suggestions based on history.</CardDescription>
-              </CardHeader>
+            <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
+              <CardHeader className="pb-3"><CardTitle className="text-sm font-mono text-slate-200">Suggested Transfers</CardTitle></CardHeader>
               <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {SUGGESTED_TRANSFERS.map((sug, i) => (
                   <div key={i} className="bg-slate-950/60 border border-slate-800 p-3 rounded flex flex-col justify-between gap-2 font-mono">
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-white">{sug.name}</span>
-                        <span className="text-[10px] text-[#00f0ff]">{sug.account}</span>
-                      </div>
+                    <div>
+                      <div className="text-xs font-bold text-white">{sug.name}</div>
                       <div className="text-xs text-emerald-400 font-bold">${sug.amount.toFixed(2)}</div>
-                      <div className="text-[10px] text-slate-500">({sug.label})</div>
                     </div>
-                    <Button 
-                      variant="outline" 
-                      size="sm" 
-                      onClick={() => setInputText(sug.text)}
-                      className="h-7 bg-slate-900 border-slate-800 hover:border-[#00f0ff] text-[11px] text-slate-300"
-                    >
-                      Prefill Request
+                    <Button variant="outline" size="sm" onClick={() => setInputText(sug.text)} className="h-7 bg-slate-900 border-slate-800 text-[11px] text-slate-300">
+                      Prefill
                     </Button>
                   </div>
                 ))}
               </CardContent>
             </Card>
-
           </div>
 
         </main>
       )}
 
-      {/* PASSWORD CONFIRMATION MODAL */}
+      {/* PASSWORD CONFIRMATION MODAL (FIX 2: DEMO PIN "123456") */}
       <Dialog open={isConfirmModalOpen} onOpenChange={setIsConfirmModalOpen}>
         <DialogContent className="bg-[#0f1523] border-slate-800 text-slate-100 font-mono">
           <DialogHeader>
@@ -1810,23 +2011,23 @@ export default function Index() {
               <Key className="w-5 h-5" /> High-Value Transfer Confirmation ($500+)
             </DialogTitle>
             <DialogDescription className="text-slate-400 text-xs">
-              This transfer exceeds $500. Two-step confirmation required to proceed. Please enter your session password.
+              This transfer exceeds $500 and is classified as SAFE_TRANSFER. Enter demo PIN <span className="text-emerald-400 font-bold">123456</span> to confirm.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-3">
-            <div className="bg-slate-950 p-3 rounded border border-slate-800 text-xs space-y-1">
+            <div className="bg-slate-950 p-3 rounded border border-slate-800 text-xs space-y-1 font-mono">
               <div><span className="text-slate-500">Amount:</span> <span className="text-emerald-400 font-bold">${pendingVerdictToConfirm?.extracted_amount?.toLocaleString()}</span></div>
               <div><span className="text-slate-500">Account:</span> <span className="text-[#00f0ff]">{pendingVerdictToConfirm?.extracted_account}</span></div>
               <div><span className="text-slate-500">Recipient:</span> <span className="text-slate-200">{pendingVerdictToConfirm?.extracted_recipient_name}</span></div>
-              <div><span className="text-slate-500">Token:</span> <span className="text-slate-400">{pendingVerdictToConfirm?.confirmation_token}</span></div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs text-slate-300">Session Password / PIN:</label>
+            <div className="space-y-1.5 font-mono">
+              <label className="text-xs text-slate-300">Demo PIN (123456):</label>
               <Input 
                 type="password"
-                placeholder="Enter password..."
+                maxLength={6}
+                placeholder="123456"
                 value={confirmationPassword}
                 onChange={(e) => setConfirmationPassword(e.target.value)}
                 className="bg-[#070a12] border-slate-800 text-white font-mono text-xs"
@@ -1835,18 +2036,11 @@ export default function Index() {
           </div>
 
           <DialogFooter>
-            <Button 
-              variant="outline" 
-              onClick={() => setIsConfirmModalOpen(false)}
-              className="bg-slate-900 border-slate-800 text-xs font-mono"
-            >
+            <Button variant="outline" onClick={() => setIsConfirmModalOpen(false)} className="bg-slate-900 border-slate-800 text-xs font-mono">
               Cancel
             </Button>
-            <Button 
-              onClick={handleConfirmHighValueAction}
-              className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-bold"
-            >
-              Confirm Transfer (Pending Execution)
+            <Button onClick={handleConfirmHighValueAction} className="bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-mono text-xs font-bold">
+              Confirm Transfer
             </Button>
           </DialogFooter>
         </DialogContent>
