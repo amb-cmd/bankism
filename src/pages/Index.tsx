@@ -13,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/use-toast';
 import confetti from 'canvas-confetti';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, Cell } from 'recharts';
@@ -184,7 +185,7 @@ export default function Index() {
   // Enrollment Form State
   const [fullNameInput, setFullNameInput] = useState('');
   const [phoneInput, setPhoneInput] = useState('');
-  const [pinInput, setPinInput] = useState('123456'); // Fix 2: Pre-filled with DEMO PIN "123456"
+  const [pinInput, setPinInput] = useState('123456');
   const [confirmPinInput, setConfirmPinInput] = useState('123456');
   const [recoveryEmailInput, setRecoveryEmailInput] = useState('');
 
@@ -192,7 +193,7 @@ export default function Index() {
   const [verifyPinInput, setVerifyPinInput] = useState('');
   const [pinAttempts, setPinAttempts] = useState(0);
 
-  // Warning & Lockout System (Fix 3)
+  // Warning & Lockout System
   const [warningCount, setWarningCount] = useState<number>(() => {
     const saved = localStorage.getItem('bankism_warning_count');
     return saved ? parseInt(saved, 10) : 0;
@@ -202,9 +203,9 @@ export default function Index() {
     if (lockedUntil && Date.now() < parseInt(lockedUntil, 10)) return true;
     return false;
   });
-  const [lockCountdownSeconds, setLockCountdownSeconds] = useState<number>(120); // 2 minutes (02:00)
+  const [lockCountdownSeconds, setLockCountdownSeconds] = useState<number>(120);
 
-  // Security Activity state (Fix 4)
+  // Security Activity state
   const [loginHistory, setLoginHistory] = useState<LoginHistoryRecord[]>(() => {
     const saved = localStorage.getItem('bankism_login_history');
     return saved ? JSON.parse(saved) : [
@@ -259,7 +260,6 @@ export default function Index() {
     return () => clearInterval(timer);
   }, []);
 
-  // Lockout countdown timer loop
   useEffect(() => {
     let interval: any;
     if (isLockedOut) {
@@ -298,7 +298,6 @@ export default function Index() {
     localStorage.setItem('bankism_session_score', sessionRiskScore.toString());
   }, [sessionRiskScore]);
 
-  // Surreal Ambient Background Particles effect
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -380,7 +379,6 @@ export default function Index() {
     };
   }, []);
 
-  // Trigger Warning & Lockout (Fix 3)
   const triggerWarning = (threatCat: string, sanitizedInput: string) => {
     const newCount = warningCount + 1;
     setWarningCount(newCount);
@@ -395,7 +393,6 @@ export default function Index() {
       localStorage.setItem('bankism_locked_until', unlockTime.toString());
       setLockCountdownSeconds(120);
 
-      // Add security alert
       const newAlert: SecurityAlertRecord = {
         id: 'sa_' + Math.random().toString(36).substring(2, 8),
         triggered_at: new Date().toISOString().replace('T', ' ').substring(0, 16),
@@ -412,7 +409,6 @@ export default function Index() {
     }
   };
 
-  // PART 1 & 2 — SIGN-IN & ENROLLMENT FLOW
   const handleGitHubLogin = () => {
     const mockGitHubUser: UserProfile = {
       id: 'gh_' + Math.random().toString(36).substring(2, 9),
@@ -457,7 +453,7 @@ export default function Index() {
     localStorage.setItem('bankism_guest', 'true');
     localStorage.removeItem('bankism_user');
     setHistory([]);
-    setCurrentView('security_activity'); // Fix 4: Show security activity before dashboard
+    setCurrentView('security_activity');
     toast({
       title: "Logged in as Guest",
       description: "Demo Mode active. Data is stored in-memory only.",
@@ -503,7 +499,7 @@ export default function Index() {
     }
 
     localStorage.removeItem('bankism_locked');
-    setCurrentView('security_activity'); // Fix 4
+    setCurrentView('security_activity');
     toast({
       title: "Security Enrollment Complete",
       description: "Profile registered successfully with demo PIN '123456'.",
@@ -511,13 +507,11 @@ export default function Index() {
   };
 
   const handleVerifyPin = () => {
-    // Fix 2: Demo PIN "123456"
     if (verifyPinInput === '123456') {
       localStorage.removeItem('bankism_locked');
       setPinAttempts(0);
       setVerifyPinInput('');
       
-      // Log successful login
       const newLogin: LoginHistoryRecord = {
         id: 'lh_' + Math.random().toString(36).substring(2, 8),
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
@@ -527,13 +521,12 @@ export default function Index() {
       };
       setLoginHistory(prev => [newLogin, ...prev]);
 
-      setCurrentView('security_activity'); // Fix 4: Show security activity before dashboard
+      setCurrentView('security_activity');
       toast({ title: "PIN Verified", description: "Secure session fully unlocked." });
     } else {
       const nextAttempts = pinAttempts + 1;
       setPinAttempts(nextAttempts);
       
-      // Log failed PIN
       const failLogin: LoginHistoryRecord = {
         id: 'lh_' + Math.random().toString(36).substring(2, 8),
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
@@ -543,7 +536,6 @@ export default function Index() {
       };
       setLoginHistory(prev => [failLogin, ...prev]);
 
-      // Trigger warning for wrong PIN (Fix 3)
       triggerWarning('invalid_pin', 'Wrong PIN attempt');
 
       toast({ title: "Incorrect PIN", description: `Attempt ${nextAttempts} of 3. Demo PIN is 123456.`, variant: "destructive" });
@@ -586,7 +578,6 @@ export default function Index() {
     });
   };
 
-  // --- 6-STAGE PIPELINE WITH FIX 1 SEMANTIC CATEGORIES ---
   const runPipeline = async (rawInput: string) => {
     if (isLockedOut) {
       toast({ title: "Session Locked", description: "Cannot analyze while session is locked.", variant: "destructive" });
@@ -682,7 +673,6 @@ export default function Index() {
 
     patternScore = Math.min(patternScore, 1.0);
 
-    // FIX 1 CATEGORY CLASSIFICATION
     let semanticCategory: 'SAFE_TRANSFER' | 'SAFE_INQUIRY' | 'MALICIOUS' | 'UNKNOWN' = 'UNKNOWN';
     let threatCategory: string | null = null;
     let blockingStage: 'sanitize' | 'pattern_scan' | 'semantic' | 'tool_guard' | 'verdict' | 'none' = 'none';
@@ -696,7 +686,6 @@ export default function Index() {
     } else if (lower.includes('transfer') || lower.includes('send') || lower.includes('acc-') || sanitized.match(/\$[0-9]+/)) {
       semanticCategory = 'SAFE_TRANSFER';
     } else {
-      // Gibberish / Unrecognized
       semanticCategory = 'UNKNOWN';
       threatCategory = 'unrecognized_request';
       blockingStage = 'semantic';
@@ -797,13 +786,6 @@ export default function Index() {
     const newSessionScore = Math.min(sessionRiskScore + currentRiskScore, 5.0);
     setSessionRiskScore(newSessionScore);
 
-    // FIX 1: CONFIRMATION MODAL RULES
-    // Confirmation appears ONLY if ALL of these are true:
-    // - Stage 3 classified input as SAFE_TRANSFER
-    // - Stage 4 extracted a valid whitelisted account
-    // - Stage 4 extracted a matching recipient name
-    // - Stage 4 extracted a numeric amount > 0
-    // - Amount > $500
     const meetsConfirmationCriteria = 
       semanticCategory === 'SAFE_TRANSFER' &&
       toolGuardPassed &&
@@ -868,12 +850,10 @@ export default function Index() {
     setCurrentStageIndex(5);
     setHistory(prev => [finalResult, ...prev.slice(0, 49)]);
 
-    // Trigger Warning if malicious (Fix 3)
     if (!isApproved && semanticCategory !== 'UNKNOWN') {
       triggerWarning(threatCategory || 'malicious_input', sanitized);
     }
 
-    // Append to transfers if safe transfer
     if (semanticCategory === 'SAFE_TRANSFER' && isApproved && extractedAccount && extractedAmount) {
       const newTransferRecord: TransferRecord = {
         id: 't_' + Math.random().toString(36).substring(2, 8),
@@ -899,7 +879,6 @@ export default function Index() {
   };
 
   const handleConfirmHighValueAction = () => {
-    // Fix 2: Demo PIN "123456" only for high value confirmation
     if (confirmationPassword !== '123456') {
       triggerWarning('invalid_pin', 'Wrong confirmation PIN');
       toast({ title: "Invalid PIN", description: "Demo PIN is 123456.", variant: "destructive" });
@@ -911,7 +890,6 @@ export default function Index() {
       setVerdict(confirmedVerdict);
       setHistory(prev => prev.map(item => item.id === confirmedVerdict.id ? confirmedVerdict : item));
       
-      // Update transfer status
       setTransfers(prev => prev.map(tx => tx.amount === pendingVerdictToConfirm.extracted_amount ? { ...tx, status: 'PENDING_EXECUTION' } : tx));
     }
 
@@ -931,7 +909,6 @@ export default function Index() {
     toast({ title: "Copied JSON verdict to clipboard" });
   };
 
-  // Dashboard Stats
   const totalRequestsCount = history.length;
   const threatsBlockedCount = history.filter(h => !h.approved).length;
   const safeApprovedCount = history.filter(h => h.approved).length;
@@ -961,12 +938,10 @@ export default function Index() {
   };
   const maxStageHit = Math.max(...Object.values(stageHits), 1);
 
-  // Unacknowledged security alerts count
   const unacknowledgedAlertsCount = securityAlerts.filter(a => !a.acknowledged).length;
 
   // ================= VIEW SWITCHER =================
 
-  // 1. LOGIN VIEW
   if (currentView === 'login' || (!user && currentView !== 'enrollment')) {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -1023,7 +998,6 @@ export default function Index() {
     );
   }
 
-  // 2. ENROLLMENT VIEW (Fix 2: Demo PIN "123456")
   if (currentView === 'enrollment') {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -1103,7 +1077,6 @@ export default function Index() {
             </div>
           </div>
 
-          {/* // DEMO ONLY — replace with hashed PIN lookup in production. */}
           <Button 
             onClick={handleCompleteEnrollment}
             className="w-full bg-gradient-to-r from-[#00f0ff] to-[#0072ff] hover:from-[#00d8e6] text-slate-950 font-mono font-bold text-xs h-11 uppercase"
@@ -1115,7 +1088,6 @@ export default function Index() {
     );
   }
 
-  // 3. VERIFY PIN VIEW (Fix 2: Demo PIN "123456")
   if (currentView === 'verify_pin') {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -1134,7 +1106,6 @@ export default function Index() {
           </div>
 
           <div className="w-full space-y-3 font-mono">
-            {/* // DEMO ONLY — replace with hashed PIN lookup in production. */}
             <Input 
               type="password"
               maxLength={6}
@@ -1168,7 +1139,6 @@ export default function Index() {
     );
   }
 
-  // 4. SECURITY ACTIVITY VIEW (FIX 4)
   if (currentView === 'security_activity') {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col p-6 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -1188,7 +1158,6 @@ export default function Index() {
             </Button>
           </div>
 
-          {/* Banner */}
           {unacknowledgedAlertsCount === 0 ? (
             <div className="p-4 rounded-lg bg-emerald-950/30 border border-emerald-500/40 text-emerald-400 font-mono text-xs flex items-center gap-3">
               <CheckCircle className="w-5 h-5" />
@@ -1203,7 +1172,6 @@ export default function Index() {
             </div>
           )}
 
-          {/* Login History Table */}
           <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-mono text-slate-200">Login History (Last 10 Logins)</CardTitle>
@@ -1240,7 +1208,6 @@ export default function Index() {
             </CardContent>
           </Card>
 
-          {/* Security Alerts Table */}
           <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-mono text-slate-200">Security Alerts</CardTitle>
@@ -1297,7 +1264,6 @@ export default function Index() {
     );
   }
 
-  // 5. ACCOUNT DETAILS VIEW (FIX 5)
   if (currentView === 'my_account') {
     return (
       <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col p-6 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
@@ -1317,7 +1283,6 @@ export default function Index() {
             </Button>
           </div>
 
-          {/* SECTION 1 — IDENTITY & PROFILE */}
           <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
             <CardHeader className="pb-3"><CardTitle className="text-sm text-slate-200">1. Identity & Profile</CardTitle></CardHeader>
             <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
@@ -1347,7 +1312,6 @@ export default function Index() {
             </CardContent>
           </Card>
 
-          {/* SECTION 2 — BALANCES & LIMITS */}
           <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
             <CardHeader className="pb-3"><CardTitle className="text-sm text-slate-200">2. Balances & Limits (USD)</CardTitle></CardHeader>
             <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1370,7 +1334,6 @@ export default function Index() {
             </CardContent>
           </Card>
 
-          {/* SECTION 3 — AUTHORIZED RECIPIENTS (WHITELIST) */}
           <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
             <CardHeader className="pb-3 flex flex-row items-center justify-between">
               <CardTitle className="text-sm text-slate-200">3. Authorized Recipients (Whitelist)</CardTitle>
@@ -1413,7 +1376,6 @@ export default function Index() {
             </CardContent>
           </Card>
 
-          {/* SECTION 4 — SECURITY & ACTIVITY SUMMARY */}
           <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
             <CardHeader className="pb-3 flex flex-row items-center justify-between">
               <CardTitle className="text-sm text-slate-200">4. Security & Activity Summary</CardTitle>
@@ -1459,7 +1421,6 @@ export default function Index() {
       <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
       <div className="absolute inset-0 pointer-events-none z-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[size:100%_4px] opacity-40"></div>
 
-      {/* FIX 3: FULL SCREEN LOCKOUT OVERLAY IF LOCKED OUT */}
       {isLockedOut && (
         <div className="fixed inset-0 z-50 bg-[#0a0e17]/95 backdrop-blur-2xl flex flex-col items-center justify-center p-6 text-center font-mono">
           <div className="max-w-md w-full bg-[#0f1523] border border-[#ff2d55]/60 rounded-2xl p-8 shadow-[0_0_80px_rgba(255,45,85,0.4)] space-y-6">
@@ -1469,7 +1430,7 @@ export default function Index() {
             <div className="space-y-2">
               <h2 className="text-xl font-bold text-[#ff2d55] tracking-widest">🔒 SESSION LOCKED</h2>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Too many suspicious attempts detected. Session will unlock in automatically.
+                Too many suspicious attempts detected. Session will unlock automatically.
               </p>
             </div>
             <div className="text-4xl font-bold text-white tracking-widest bg-slate-950 p-4 rounded-xl border border-slate-800">
@@ -1482,7 +1443,6 @@ export default function Index() {
         </div>
       )}
 
-      {/* DEMO BANNER */}
       <div className="relative z-30 bg-[#ff2d55]/10 border-b border-[#ff2d55]/30 px-4 py-2 text-center text-xs font-mono text-[#ff2d55] tracking-widest uppercase flex items-center justify-center gap-2">
         <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
         <span>
@@ -1493,7 +1453,6 @@ export default function Index() {
         <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
       </div>
 
-      {/* SHARED HEADER (FIX 3 WARNINGS BADGE & FIX 5 NAVIGATION) */}
       <header className="relative z-30 border-b border-slate-800 bg-[#0a0e17]/80 backdrop-blur-md px-6 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
@@ -1547,10 +1506,7 @@ export default function Index() {
           </nav>
         </div>
 
-        {/* RIGHT HEADER ACTIONS (WARNINGS: X/3 BADGE) */}
         <div className="flex items-center gap-3 font-mono text-xs">
-          
-          {/* WARNINGS BADGE (FIX 3) */}
           <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border ${
             warningCount === 0 ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-400' :
             warningCount === 1 ? 'bg-yellow-950/40 border-yellow-500/40 text-yellow-400' :
@@ -1593,7 +1549,7 @@ export default function Index() {
         </div>
       </header>
 
-      {/* ================= DASHBOARD VIEW (RECONFIRMED SECTIONS) ================= */}
+      {/* ================= DASHBOARD VIEW ================= */}
       {currentView === 'dashboard' && (
         <main className="relative z-30 flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 flex flex-col gap-6">
           
@@ -1611,7 +1567,6 @@ export default function Index() {
             </Button>
           </div>
 
-          {/* TOP ROW — 4 STAT CARDS */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800 relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#00f0ff]"></div>
@@ -1666,9 +1621,7 @@ export default function Index() {
             </Card>
           </div>
 
-          {/* DASHBOARD SECTIONS (IDENTITY, ACCOUNT SUMMARY, RECENT TRANSFERS) */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            
             <div className="lg:col-span-1 flex flex-col gap-6">
               <Card className="bg-[#0f1523]/80 backdrop-blur-xl border-slate-800">
                 <CardHeader className="pb-3 flex flex-row items-center justify-between">
@@ -1781,7 +1734,6 @@ export default function Index() {
                 </CardContent>
               </Card>
             </div>
-
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2003,7 +1955,6 @@ export default function Index() {
         </main>
       )}
 
-      {/* PASSWORD CONFIRMATION MODAL (FIX 2: DEMO PIN "123456") */}
       <Dialog open={isConfirmModalOpen} onOpenChange={setIsConfirmModalOpen}>
         <DialogContent className="bg-[#0f1523] border-slate-800 text-slate-100 font-mono">
           <DialogHeader>
