@@ -151,8 +151,8 @@ export default function Index() {
   // Views: 'login' | 'enrollment' | 'verify_pin' | 'security_activity' | 'my_account' | 'dashboard' | 'analyzer'
   const [currentView, setCurrentView] = useState<'login' | 'enrollment' | 'verify_pin' | 'security_activity' | 'my_account' | 'dashboard' | 'analyzer'>(() => {
     const savedUser = localStorage.getItem('bankism_user');
-    const isGuest = localStorage.getItem('bankism_guest'] === 'true';
-    const isLocked = localStorage.getItem('bankism_locked'] === 'true';
+    const isGuest = localStorage.getItem('bankism_guest') === 'true';
+    const isLocked = localStorage.getItem('bankism_locked') === 'true';
     if (isGuest) return 'dashboard';
     if (isLocked) return 'verify_pin';
     if (savedUser) {
