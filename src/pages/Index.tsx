@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Shield, ShieldAlert, ShieldCheck, Terminal, Cpu, Lock, AlertTriangle, 
-  CheckCircle2, XCircle, RefreshCw, LogOut, Github, ArrowRight, Play, 
+  CheckCircle2, XCircle, RefreshCw, LogOut, ArrowRight, Play,
   Activity, Zap, Database, Server, Flame, Eye, Copy, Check, Clock, Globe,
   HelpCircle, Settings, UserCheck, Key, AlertOctagon, BarChart3, LayoutDashboard, UserX, User,
   DollarSign, CheckSquare, Sparkles, LockKeyhole, History, CheckCircle
@@ -388,55 +388,22 @@ export default function Index() {
     } else if (newCount === 2) {
       toast({ title: "Security Warning 2 of 3 — Session locks after one more", description: `Threat detected: ${threatCat}`, variant: "destructive" });
     } else if (newCount >= 3) {
-      setIsLockedOut(true);
+      // 3rd Warning Trigger: Immediate sign out, clear session state, store locked_until, redirect to /login
       const unlockTime = Date.now() + 120000;
       localStorage.setItem('bankism_locked_until', unlockTime.toString());
-      setLockCountdownSeconds(120);
+      localStorage.setItem('bankism_lock_banner', "🔒 Your session was locked due to multiple suspicious attempts. Please log in again.");
 
-      const newAlert: SecurityAlertRecord = {
-        id: 'sa_' + Math.random().toString(36).substring(2, 8),
-        triggered_at: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        alert_type: 'SESSION_LOCKED',
-        severity: 'CRITICAL',
-        threat_categories: [threatCat, 'multiple_warnings'],
-        sanitized_inputs: [sanitizedInput],
-        acknowledged: false,
-        rationale: `Session locked automatically after accumulating 3 security warnings. Last trigger: ${threatCat}`
-      };
-      setSecurityAlerts(prev => [newAlert, ...prev]);
+      // Clear all session state
+      localStorage.removeItem('bankism_user');
+      localStorage.removeItem('bankism_warning_count');
+      localStorage.removeItem('bankism_history');
+      localStorage.removeItem('bankism_session_score');
 
-      toast({ title: "🚨 SESSION LOCKED", description: "Too many suspicious attempts detected. Locked for 02:00 minutes.", variant: "destructive" });
+      window.location.href = '/login';
     }
   };
 
-  const handleGitHubLogin = () => {
-    const mockGitHubUser: UserProfile = {
-      id: 'gh_' + Math.random().toString(36).substring(2, 9),
-      name: 'Cyber Security Officer',
-      email: 'secops@bankism.io',
-      avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-      is_guest: false,
-      enrollment_completed: false
-    };
-
-    const savedProfile = localStorage.getItem('bankism_profile_' + mockGitHubUser.id);
-    if (savedProfile) {
-      const profileData = JSON.parse(savedProfile);
-      const fullUser = { ...mockGitHubUser, ...profileData, enrollment_completed: true };
-      setUser(fullUser);
-      localStorage.setItem('bankism_user', JSON.stringify(fullUser));
-      setCurrentView('verify_pin');
-    } else {
-      setUser(mockGitHubUser);
-      localStorage.setItem('bankism_user', JSON.stringify(mockGitHubUser));
-      setCurrentView('enrollment');
-    }
-
-    toast({
-      title: "GitHub OAuth Successful",
-      description: "Proceeding to security verification.",
-    });
-  };
+  // GitHub OAuth handler removed
 
   const handleGuestLogin = () => {
     const guestUser: UserProfile = {
@@ -560,11 +527,11 @@ export default function Index() {
     localStorage.removeItem('bankism_guest');
     localStorage.removeItem('bankism_locked');
     setHistory([]);
-    setCurrentView('login');
     toast({
       title: "Signed Out",
       description: "Secure session terminated.",
     });
+    window.location.href = '/login';
   };
 
   const handleResetSession = () => {
@@ -942,61 +909,7 @@ export default function Index() {
 
   // ================= VIEW SWITCHER =================
 
-  if (currentView === 'login' || (!user && currentView !== 'enrollment')) {
-    return (
-      <div className="min-h-screen bg-[#0a0e17] text-slate-100 font-sans relative overflow-x-hidden flex flex-col items-center justify-center p-4 selection:bg-[#00f0ff]/30 selection:text-[#00f0ff]">
-        <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-0" />
-        <div className="absolute inset-0 pointer-events-none z-0 opacity-20 bg-[linear-gradient(to_right,#1f293d_1px,transparent_1px),linear-gradient(to_bottom,#1f293d_1px,transparent_1px)] bg-[size:4rem_4rem]"></div>
-        <div className="absolute inset-0 pointer-events-none z-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[size:100%_4px] opacity-40"></div>
-
-        <div className="relative z-30 max-w-md w-full bg-[#0f1523]/80 backdrop-blur-xl border border-slate-800 rounded-xl p-8 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col items-center text-center gap-6">
-          <div className="relative flex items-center justify-center w-16 h-16 rounded-xl bg-gradient-to-br from-[#00f0ff]/20 to-[#ff2d55]/20 border border-[#00f0ff]/40 shadow-[0_0_25px_rgba(0,240,255,0.3)] animate-pulse">
-            <Shield className="w-9 h-9 text-[#00f0ff]" />
-          </div>
-
-          <div className="space-y-2">
-            <h1 className="text-2xl font-bold tracking-widest font-mono text-white flex items-center justify-center gap-2">
-              BANKISM <span className="text-xs px-2 py-0.5 rounded bg-[#00f0ff]/10 border border-[#00f0ff]/30 text-[#00f0ff]">AI</span>
-            </h1>
-            <p className="text-xs text-slate-400 font-mono tracking-tight">Blue-Team AI Firewall // Threat Interception Layer</p>
-          </div>
-
-          <p className="text-xs text-slate-300 font-mono leading-relaxed">
-            Intercept and neutralize adversarial banking requests before they reach the core.
-          </p>
-
-          <div className="w-full flex flex-col gap-3">
-            <Button 
-              onClick={handleGitHubLogin}
-              className="w-full h-12 bg-[#24292e] hover:bg-[#2f363d] text-white border border-slate-700 font-mono text-xs gap-3 shadow-[0_0_20px_rgba(36,41,46,0.5)] transition-all hover:scale-[1.02]"
-            >
-              <Github className="w-5 h-5" />
-              Sign in with GitHub
-            </Button>
-
-            <div className="flex items-center gap-3 my-1">
-              <Separator className="flex-1 bg-slate-800" />
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">OR</span>
-              <Separator className="flex-1 bg-slate-800" />
-            </div>
-
-            <Button 
-              onClick={handleGuestLogin}
-              variant="outline"
-              className="w-full h-11 bg-slate-900/80 hover:bg-slate-900 text-slate-300 hover:text-white border-slate-800 hover:border-[#00f0ff]/50 font-mono text-xs gap-2.5 transition-all"
-            >
-              <UserX className="w-4 h-4 text-[#00f0ff]" />
-              Continue as Guest (Demo Mode)
-            </Button>
-          </div>
-
-          <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest bg-slate-900/60 px-3 py-1 rounded border border-slate-800">
-            DEMO ENVIRONMENT — SECURE OAUTH GATEWAY
-          </div>
-        </div>
-      </div>
-    );
-  }
+// Unauthenticated users are guarded at the route level in App.tsx
 
   if (currentView === 'enrollment') {
     return (
