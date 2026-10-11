@@ -67,32 +67,45 @@ ChartContainer.displayName = "Chart";
 
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
   const colorConfig = Object.entries(config).filter(
-    ([_, config]) => config.theme || config.color,
+    ([_, itemConfig]) => itemConfig.theme || itemConfig.color,
   );
 
   if (!colorConfig.length) {
     return null;
   }
 
+  // Sanitize chart config keys and color values to prevent injection
+  const sanitizedCss = Object.entries(THEMES)
+    .map(([theme, prefix]) => {
+      const rules = colorConfig
+        .map(([key, itemConfig]) => {
+          // Allow only safe CSS identifier chars for key and safe color string chars (alphanumeric, hex, rgb, hsl, var, spaces, hyphens, parentheses, commas, dots)
+          const safeKey = key.replace(/[^a-zA-Z0-9-_]/g, "");
+          const rawColor =
+            itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
+            itemConfig.color;
+          if (!rawColor) return null;
+          const safeColor = String(rawColor).replace(/[^a-zA-Z0-9#%(),.\s-_]/g, "");
+          return `  --color-${safeKey}: ${safeColor};`;
+        })
+        .filter(Boolean)
+        .join("\n");
+
+      if (!rules) return "";
+      const safePrefix = prefix.replace(/[^a-zA-Z0-9-_.]/g, "");
+      const safeId = id.replace(/[^a-zA-Z0-9-_]/g, "");
+      return `
+${safePrefix} [data-chart=${safeId}] {
+${rules}
+}
+`;
+    })
+    .join("\n");
+
   return (
     <style
       dangerouslySetInnerHTML={{
-        __html: Object.entries(THEMES)
-          .map(
-            ([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
-${colorConfig
-  .map(([key, itemConfig]) => {
-    const color =
-      itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
-      itemConfig.color;
-    return color ? `  --color-${key}: ${color};` : null;
-  })
-  .join("\n")}
-}
-`,
-          )
-          .join("\n"),
+        __html: sanitizedCss,
       }}
     />
   );
